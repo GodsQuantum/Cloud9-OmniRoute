@@ -1,0 +1,25 @@
+{
+  "schema": "cloud9-omniroute-upstream-lock-v1",
+  "upstream_repo": "cheaper-inference/OmniRoute",
+  "stable_tag": "v3.8.53",
+  "patch_repository": "GodsQuantum/Cloud9-local-Patches",
+  "patches": [
+    {
+      "file": "OmniRoute/production/Dockerfile.cloud9-branding",
+      "sha256": "d6027566721f19fb1b5553639f12134226b5a1aae7d98d35b3dcf58fbce39919"
+    },
+    {
+      "file": "OmniRoute/production/apply-cloud9-source-compat.py",
+      "sha256": "bd69a33d768099994e0ed4d7bda2002a6afa0b1d762429fbd682cdc9b5b57d72"
+    },
+    {
+      "file": "OmniRoute/production/cleanroom-csp-forward.patch",
+      "sha256": "65624e8278b490d67428994f8ba51dfc54fee9f8f979ed4a5ffc751bb0dcc400"
+    },
+    {
+      "file": "OmniRoute/production/patch-cloud9-provider-branding.js",
+      "sha256": "1c1457f93952d73d6a614ebb5e2734145516a225899abce5929c29f71782a773"
+    }
+  ],
+  "status": "baseline_only_no_build_or_deploy"
+}

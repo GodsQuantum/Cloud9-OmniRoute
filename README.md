@@ -1,13 +1,27 @@
-# Cloud9-OmniRoute — private upstream maintenance
+<p align="center"><img src="docs/logo.svg" width="880" alt="Cloud9 OmniRoute"></p>
 
-**Private control repository** for the Cloud9 production distribution of [OmniRoute](https://github.com/cheaper-inference/OmniRoute). This is **not** a second 2.4 GB source mirror or an application source fork; the production build starts from each official stable upstream tag.
+# Cloud9-OmniRoute
 
-- Last certified upstream baseline: `v3.8.53`.
-- **Canonical code patch files (4)** live only in [Cloud9-local-Patches](https://github.com/GodsQuantum/Cloud9-local-Patches), under `OmniRoute/production/`. This repository records their SHA256 in `upstream-lock.json` but does not duplicate their bytes.
-- CT700 applies those patches via the existing canonical builder and runs compatibility tests before production deployment. The current runtime must never be replaced by a raw upstream image if Gemini multi-image, strict 1min.AI tools, Codex imagery or Cleanroom/CSP behavior would regress.
-- A weekly GitHub Actions check reports new upstream releases as an issue. Upstream updates are **not** blindly merged and no private Cloud9 secrets are needed.
-- A future CI→GHCR publishing pipeline must prove the same feature parity and OCI provenance before replacing the existing CT700 path. **Not certified yet.**
+**Official [OmniRoute](https://github.com/cheaper-inference/OmniRoute) stable releases with small, reusable, version-aware enhancements.** Images are built on GitHub, not the production server.
 
-The separate public native fork `GodsQuantum/OmniRoute` cannot change to private directly while it belongs to GitHub's public fork network. It is not the current Cloud9 production source of truth.
+English · [Français](README.fr.md) · [简体中文](README.zh-CN.md)
 
-No application binaries, credentials, custom domains or local deployment files are published here.
+![Upstream-first architecture and features](docs/architecture.svg)
+
+## What Cloud9 adds
+
+| Enhancement | Difference from official upstream |
+|---|---|
+| Cleanroom and ChatGPT Web CSP | Compatible browser module bridge without bypassing upstream security |
+| Gemini inline images | One to four validated JPEG/PNG/WebP reference images, with no remote URL fetching |
+| Strict API tool replies | Remove invalid tool-message names only for configured provider IDs; preserve native behavior otherwise |
+| Codex image inventory | Support dedicated image models while retaining OAuth and quotas |
+| Cloud9 UI | Cloud9 Engine and Speaches icon assets |
+
+The source overlay checks official TypeScript anchors and fails closed on incompatible upstream changes. Provider selection uses the configurable OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS environment variable, not any user's hardcoded account.
+
+GitHub Actions downloads the latest official **stable tag**, applies the Cleanroom patch and maintained TypeScript adapters, tests them, builds official runner-web, and publishes an immutable GHCR candidate. The candidate never automatically becomes latest or updates production before authenticated providers, models, Cleanroom, persistent data and rollback are verified.
+
+The public repository and image contain no personal URLs, passwords, OAuth cookies, account identifiers or tokens; those remain in the user's private configuration and volumes.
+
+MIT license, as with the upstream project. Independent distribution, not an official OmniRoute release.

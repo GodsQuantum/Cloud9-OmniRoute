@@ -1,0 +1,14 @@
+# Cloud9 provider branding is an intentionally local visual customization.
+# Main logic patches are applied at TypeScript source level in CT700.
+# The final image is reproducible from the official pinned release build.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS cloud9-release
+USER root
+COPY --chown=root:root assets/cloud9-engine.png /app/public/providers/cloud9-assets/cloud9-engine.png
+COPY --chown=root:root assets/cloud9-speaches.png /app/public/providers/cloud9-assets/cloud9-speaches.png
+COPY --chown=root:root overlays/patch-cloud9-provider-branding.js /tmp/cloud9-provider-branding.js
+RUN node /tmp/cloud9-provider-branding.js \
+    && rm -f /tmp/cloud9-provider-branding.js
+LABEL io.cloud9.builder="GitHub-Actions" \
+      io.cloud9.source="official-omniroute-plus-validated-cloud9-patches"
+USER node

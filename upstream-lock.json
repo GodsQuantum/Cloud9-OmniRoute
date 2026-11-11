@@ -1,25 +1,26 @@
 {
-  "schema": "cloud9-omniroute-upstream-lock-v1",
+  "schema": "cloud9-omniroute-upstream-overlay-v2",
   "upstream_repo": "cheaper-inference/OmniRoute",
   "stable_tag": "v3.8.53",
-  "patch_repository": "GodsQuantum/Cloud9-local-Patches",
+  "source_repo": "GodsQuantum/Cloud9-OmniRoute",
   "patches": [
     {
-      "file": "OmniRoute/production/Dockerfile.cloud9-branding",
-      "sha256": "d6027566721f19fb1b5553639f12134226b5a1aae7d98d35b3dcf58fbce39919"
+      "file": "overlays/Dockerfile.cloud9-branding",
+      "sha256": "99269d7178bda35817b6c005b756fab075181b4f9b05f464e4684958a9c13f55"
     },
     {
-      "file": "OmniRoute/production/apply-cloud9-source-compat.py",
-      "sha256": "bd69a33d768099994e0ed4d7bda2002a6afa0b1d762429fbd682cdc9b5b57d72"
+      "file": "overlays/apply-cloud9-source-compat.py",
+      "sha256": "db9187b84441e7ca95c1cc6d0991f786927029775a16baa3fe66326b7755c11b"
     },
     {
-      "file": "OmniRoute/production/cleanroom-csp-forward.patch",
+      "file": "overlays/cleanroom-csp-forward.patch",
       "sha256": "65624e8278b490d67428994f8ba51dfc54fee9f8f979ed4a5ffc751bb0dcc400"
     },
     {
-      "file": "OmniRoute/production/patch-cloud9-provider-branding.js",
-      "sha256": "1c1457f93952d73d6a614ebb5e2734145516a225899abce5929c29f71782a773"
+      "file": "overlays/patch-cloud9-provider-branding.js",
+      "sha256": "50021468b2b1eba767d222bb34bf004ea8f3e75c6d6b17afa570d17f8b043350"
     }
   ],
-  "status": "baseline_only_no_build_or_deploy"
+  "build": "Official runner-web plus source-level overlays, strict provider env and Cloud9 assets",
+  "status": "candidate_ci_no_production_auto_deploy"
 }

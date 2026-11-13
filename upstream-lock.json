@@ -6,7 +6,7 @@
   "patches": [
     {
       "file": "overlays/Dockerfile.cloud9-branding",
-      "sha256": "99269d7178bda35817b6c005b756fab075181b4f9b05f464e4684958a9c13f55"
+      "sha256": "d13a51dfa0cd449695b2c21236067bb5eb0005fe0e5bcebcf47c0f6e41a93445"
     },
     {
       "file": "overlays/apply-cloud9-source-compat.py",

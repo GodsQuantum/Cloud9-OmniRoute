@@ -4,6 +4,20 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE} AS cloud9-release
 USER root
+# The official Next standalone runner omits the vendor MCP sources used by the
+# native ChatGPT Web (Codex) tunnel. Package only its upstream server entry.
+# The BuildKit context always comes from the exact upstream tag selected by CI.
+COPY --from=mcpvendor / /app/.cloud9-mcp-vendor/
+RUN set -eu; \
+    test -f /app/.cloud9-mcp-vendor/adapters/chatgpt-web/mcp-server.ts; \
+    mkdir -p /app/dist/open-sse/vendor/codex-chatgpt-web/adapters/chatgpt-web; \
+    node /app/node_modules/esbuild/bin/esbuild \
+      /app/.cloud9-mcp-vendor/adapters/chatgpt-web/mcp-server.ts \
+      --bundle --platform=node --format=esm --target=node26 --packages=external \
+      --outfile=/app/dist/open-sse/vendor/codex-chatgpt-web/adapters/chatgpt-web/mcp-server.js; \
+    printf '{"type":"module"}\n' > /app/dist/open-sse/vendor/codex-chatgpt-web/adapters/chatgpt-web/package.json; \
+    node --input-type=module -e "import('/app/dist/open-sse/vendor/codex-chatgpt-web/adapters/chatgpt-web/mcp-server.js').then(m => { if (typeof m.runChatGptMcpServer !== 'function') process.exit(11); })"; \
+    rm -rf /app/.cloud9-mcp-vendor
 COPY --chown=root:root assets/cloud9-engine.png /app/public/providers/cloud9-assets/cloud9-engine.png
 COPY --chown=root:root assets/cloud9-speaches.png /app/public/providers/cloud9-assets/cloud9-speaches.png
 COPY --chown=root:root overlays/patch-cloud9-provider-branding.js /tmp/cloud9-provider-branding.js

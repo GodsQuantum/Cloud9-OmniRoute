@@ -69,7 +69,9 @@ jobs:
           node --import tsx/esm --import ./open-sse/utils/setupPolyfill.ts \
             --test --test-force-exit \
             tests/unit/cloud9-source-overlay.test.ts \
-            tests/unit/chatgpt-web-first-party-cleanroom.test.ts
+            tests/unit/chatgpt-web-first-party-cleanroom.test.ts \
+            tests/unit/chatgpt-web-browser-session-cleanroom.test.ts \
+            tests/unit/chatgpt-web-executor-adapter-cleanroom.test.ts
           echo CLOUD9_OMNIROUTE_SOURCE_AND_CLEANROOM_UNIT_TESTS_PASS
   build:
     needs: verify

@@ -194,4 +194,171 @@ change("src/sse/services/auth.ts",
         !isDedicatedCodexImageModel(c.provider, requestedModel) &&
         ((c.provider === "codex" && advertisedModelsByConnection.get(c.id)?.size === 0) ||
           !isRequestedModelAdvertised(''')
+
+# Upstream v3.8.53 cleanroom: use the already-existing first-party bridge
+# only if the composer was NEVER mounted. Never re-send after input/click.
+change("open-sse/utils/chatgptWebBrowserSession.ts",
+'''function turnError(error: unknown, fallback: string): Error {
+  return error instanceof Error ? error : new Error(fallback);
+}
+
+class ChatGptWebBrowserTurnRunner {''',
+'''function turnError(error: unknown, fallback: string): Error {
+  return error instanceof Error ? error : new Error(fallback);
+}
+
+/** Pre-submit failure: no message could have been entered or sent. */
+export class ChatGptWebComposerUnavailableError extends Error {
+  constructor() {
+    super("ChatGPT Web composer was not visible before prompt submission");
+    this.name = "ChatGptWebComposerUnavailableError";
+  }
+}
+
+class ChatGptWebBrowserTurnRunner {''')
+
+change("open-sse/utils/chatgptWebBrowserSession.ts",
+'''  private submitPrompt(): void {
+    // Preferred path: let the page sign and send its own request from the composer.''',
+'''  private submitPrompt(): void {
+    const submitDirect = (): void => {
+      if (this.settled || this.turnController.signal.aborted) return;
+      this.submitPromptDirect();
+    };
+    // Preferred path: let the page sign and send its own request from the composer.''')
+
+change("open-sse/utils/chatgptWebBrowserSession.ts",
+'''        .catch((error: unknown) => {
+          this.fail(turnError(error, "ChatGPT Web composer submission failed"));
+        });
+      return;
+    }
+    void this.session
+      .submitPrompt({''',
+'''        .catch((error: unknown) => {
+          if (
+            error instanceof ChatGptWebComposerUnavailableError &&
+            !this.settled &&
+            !this.turnController.signal.aborted
+          ) {
+            // The composer never mounted: no prior send is possible.
+            submitDirect();
+            return;
+          }
+          this.fail(turnError(error, "ChatGPT Web composer submission failed"));
+        });
+      return;
+    }
+    submitDirect();
+  }
+
+  private submitPromptDirect(): void {
+    void this.session
+      .submitPrompt({''')
+
+change("open-sse/utils/chatgptWebBrowserSession.ts",
+'''    const retry = this.page.locator(combinedSelector).first();
+    await retry.waitFor({ state: "visible", timeout: COMPOSER_WAIT_TIMEOUT_MS });
+    return retry;''',
+'''    const retry = this.page.locator(combinedSelector).first();
+    try {
+      await retry.waitFor({ state: "visible", timeout: COMPOSER_WAIT_TIMEOUT_MS });
+    } catch (error) {
+      if (this.page.isClosed()) throw error;
+      throw new ChatGptWebComposerUnavailableError();
+    }
+    return retry;''')
+
+change("tests/unit/chatgpt-web-browser-session-cleanroom.test.ts",
+'''  PlaywrightChatGptWebBrowserSession,
+  parseChatGptWebDirectConversation,''',
+'''  PlaywrightChatGptWebBrowserSession,
+  ChatGptWebComposerUnavailableError,
+  parseChatGptWebDirectConversation,''')
+
+change("tests/unit/chatgpt-web-browser-session-cleanroom.test.ts",
+'''  test("buffers WebSocket frames until handoff and returns only decoded output", async () => {''',
+'''  test("falls back once to the native direct bridge only before composer input", async () => {
+    const directSse =
+      'event: delta_encoding\\ndata: "v1"\\n\\n' +
+      'event: delta\\ndata: {"p":"","o":"add","v":{"message":{' +
+      '"id":"assistant-message","author":{"role":"assistant"},' +
+      '"content":{"content_type":"text","parts":["RECOVERY_OK"]},' +
+      '"status":"finished_successfully","end_turn":true}}}\\n\\n' +
+      'data: [DONE]\\n\\n';
+    let composerAttempts = 0;
+    let directAttempts = 0;
+    const session = {
+      url: () => "https://chatgpt.com/?temporary-chat=true",
+      start: async () => async () => {},
+      submitPromptViaComposer: async () => {
+        composerAttempts++;
+        throw new ChatGptWebComposerUnavailableError();
+      },
+      awaitRenderedAssistantText: async () => null,
+      submitPrompt: async () => {
+        directAttempts++;
+        return directSse;
+      },
+    } satisfies ChatGptWebBrowserSession;
+    const result = await runChatGptWebBrowserTurn(session, {
+      prompt: "pre-submit recovery",
+      timeoutMs: 1_000,
+    });
+    assert.equal(result.text, "RECOVERY_OK");
+    assert.equal(composerAttempts, 1);
+    assert.equal(directAttempts, 1);
+  });
+
+  test("never sends twice after a composer input or click failure", async () => {
+    let directAttempts = 0;
+    const session = {
+      url: () => "https://chatgpt.com/?temporary-chat=true",
+      start: async () => async () => {},
+      submitPromptViaComposer: async () => {
+        throw new Error("click failed after input");
+      },
+      awaitRenderedAssistantText: async () => null,
+      submitPrompt: async () => {
+        directAttempts++;
+        return "";
+      },
+    } satisfies ChatGptWebBrowserSession;
+    await assert.rejects(
+      runChatGptWebBrowserTurn(session, { prompt: "no duplicate", timeoutMs: 1_000 }),
+      /click failed after input/
+    );
+    assert.equal(directAttempts, 0);
+  });
+
+  test("does not use bridge if abort fired before missing-composer fallback", async () => {
+    const controller = new AbortController();
+    let directAttempts = 0;
+    const session = {
+      url: () => "https://chatgpt.com/?temporary-chat=true",
+      start: async () => async () => {},
+      submitPromptViaComposer: async () => {
+        controller.abort();
+        throw new ChatGptWebComposerUnavailableError();
+      },
+      awaitRenderedAssistantText: async () => null,
+      submitPrompt: async () => {
+        directAttempts++;
+        return "";
+      },
+    } satisfies ChatGptWebBrowserSession;
+    await assert.rejects(
+      runChatGptWebBrowserTurn(session, {
+        prompt: "abort",
+        signal: controller.signal,
+        timeoutMs: 1_000,
+      }),
+      /composer was not visible|aborted/
+    );
+    assert.equal(directAttempts, 0);
+  });
+
+  test("buffers WebSocket frames until handoff and returns only decoded output", async () => {''')
+print("CLOUD9_CHATGPT_COMPOSER_PRESUBMIT_FALLBACK_APPLIED")
+
 print("CLOUD9_SOURCE_OVERLAY_APPLIED")

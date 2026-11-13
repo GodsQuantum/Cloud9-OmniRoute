@@ -10,7 +10,7 @@
     },
     {
       "file": "overlays/apply-cloud9-source-compat.py",
-      "sha256": "db9187b84441e7ca95c1cc6d0991f786927029775a16baa3fe66326b7755c11b"
+      "sha256": "1dc08a4fdffeccbd09873bafc068cd338d4499e11444e92a4613bc5fdd8bbb26"
     },
     {
       "file": "overlays/cleanroom-csp-forward.patch",

@@ -52,7 +52,6 @@ jobs:
           fi
           python3 ../overlays/apply-cloud9-source-compat.py .
           git diff --check
-          grep -Fq OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS open-sse/executors/default/oneMinToolReplay.ts
           test -f tests/unit/cloud9-source-overlay.test.ts
           echo OMNIROUTE_FOUR_OVERLAYS_VERSION_CHECK_PASS
       - uses: actions/setup-node@v4

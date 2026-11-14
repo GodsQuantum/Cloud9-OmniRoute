@@ -8,7 +8,7 @@
 
 ![Architecture upstream et GitHub](docs/architecture.svg)
 
-L'application officielle reste la base de chaque mise à jour. Seuls les correctifs encore nécessaires sont appliqués : compatibilité **Cleanroom / ChatGPT Web CSP** ; **1 à 4 images de référence Gemini** sans fetch d'URL distantes ; normalisation des résultats d'outils uniquement pour les fournisseurs OpenAI compatibles identifiés dans OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS ; prise en charge des modèles d'images **Codex** sans affaiblir OAuth/quotas ; branding **Cloud9 Engine et Speaches**.
+L'application officielle reste la base de chaque mise à jour. Correctifs conservés après comparaison A/B avec la release officielle : passerelle CSP Cleanroom, 1 à 4 images de référence Gemini sans fetch d'URL distantes, images dédiées Codex, packaging du MCP Codex standalone et protection de son verrou PID. Le correctif optionnel des réponses d'outils strictes a été retiré : désactivé et inutilisé en production.
 
 La CI refuse tout changement upstream non reconnu. Elle publie des candidats immuables, sans basculer la production ni pousser latest avant les tests de routage, authentification, images, Cleanroom, données et rollback.
 

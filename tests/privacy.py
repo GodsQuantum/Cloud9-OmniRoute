@@ -35,6 +35,8 @@ for name in ('cloud9-engine.png','cloud9-speaches.png'):
  assert b'IDAT' in types and b'IEND' in types
  assert not any(t in types for t in (b'tEXt',b'iTXt',b'zTXt',b'eXIf'))
 code=(root/'overlays/apply-cloud9-source-compat.py').read_text()
-assert 'OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS' in code
+assert 'geminiInlineMultiImageParts' in code
+assert 'isDedicatedCodexImageModel' in code
+assert 'processIsAlive' in code
 assert '68f04eeb-180b' not in code
 print('OMNIROUTE_PUBLIC_HISTORY_AND_FOUR_OVERLAYS_PRIVACY_ICONS_LOCK_EN_FR_ZH_PASS')

@@ -194,4 +194,110 @@ change("src/sse/services/auth.ts",
         !isDedicatedCodexImageModel(c.provider, requestedModel) &&
         ((c.provider === "codex" && advertisedModelsByConnection.get(c.id)?.size === 0) ||
           !isRequestedModelAdvertised(''')
+
+# CLOUD9_NATIVE_SUPERVISOR_PID_REUSE:
+# The original lease only checks kill(pid, 0). After a container restart that
+# PID can belong to an unrelated Node worker thread or a different process.
+# Record Linux /proc starttime for future leases and reject non-process TGIDs.
+change("open-sse/executors/chatgpt-web-codex/tunnelClient.ts",
+'''type SupervisorLease = {
+  version: 1;
+  pid: number;
+  startedAt: string;
+};''',
+'''type SupervisorLease = {
+  version: 1;
+  pid: number;
+  startedAt: string;
+  ownerStartTicks?: string;
+};''')
+change("open-sse/executors/chatgpt-web-codex/tunnelClient.ts",
+'''function processIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}''',
+'''function linuxProcessIdentity(pid: number): { tgid: number; ticks: string } | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const status = readFileSync("/proc/" + pid + "/status", "utf8");
+    const tgid = Number(status.match(/^Tgid:\\s*(\\d+)/m)?.[1] || 0);
+    const stat = readFileSync("/proc/" + pid + "/stat", "utf8");
+    const end = stat.lastIndexOf(")");
+    const ticks = stat.slice(end + 2).trim().split(/\\s+/)[19] || "";
+    return tgid > 0 && end > 0 && /^\\d+$/.test(ticks) ? { tgid, ticks } : null;
+  } catch {
+    return null;
+  }
+}
+export function processIsAlive(pid: number, ownerStartTicks?: string): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  const linux = linuxProcessIdentity(pid);
+  if (linux && (linux.tgid !== pid ||
+       (ownerStartTicks && ownerStartTicks !== linux.ticks))) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}''')
+change("open-sse/executors/chatgpt-web-codex/tunnelClient.ts",
+'''        const lease: SupervisorLease = {
+          version: 1,
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+        };''',
+'''        const ownerStartTicks = linuxProcessIdentity(process.pid)?.ticks;
+        const lease: SupervisorLease = {
+          version: 1,
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+          ...(ownerStartTicks ? { ownerStartTicks } : {}),
+        };''')
+change("open-sse/executors/chatgpt-web-codex/tunnelClient.ts",
+'''      let ownerPid = 0;
+      try {
+        const lease = JSON.parse(readFileSync(path, "utf8")) as Partial<SupervisorLease>;
+        ownerPid = Number(lease.pid) || 0;
+      } catch {
+        ownerPid = 0;
+      }''',
+'''      let ownerPid = 0;
+      let ownerStartTicks: string | undefined;
+      try {
+        const lease = JSON.parse(readFileSync(path, "utf8")) as Partial<SupervisorLease>;
+        ownerPid = Number(lease.pid) || 0;
+        ownerStartTicks = typeof lease.ownerStartTicks === "string" ? lease.ownerStartTicks : undefined;
+      } catch {
+        ownerPid = 0;
+      }''')
+change("open-sse/executors/chatgpt-web-codex/tunnelClient.ts",
+'''      if (processIsAlive(ownerPid)) {''',
+'''      if (processIsAlive(ownerPid, ownerStartTicks)) {''')
+change("open-sse/executors/chatgpt-web-codex/tunnelClient.ts",
+'''      conflict: Boolean(ownerPid && ownerPid !== process.pid && processIsAlive(ownerPid)),''',
+'''      conflict: Boolean(ownerPid && ownerPid !== process.pid &&
+        processIsAlive(ownerPid, lease.ownerStartTicks)),''')
+add("tests/unit/cloud9-tunnel-supervisor-lease.test.ts",'''import test from "node:test";
+import assert from "node:assert/strict";
+import { readdirSync } from "node:fs";
+import { processIsAlive } from "../../open-sse/executors/chatgpt-web-codex/tunnelClient.ts";
+
+test("native tunnel supervisor recognises the running owner and invalid pid", () => {
+  assert.equal(processIsAlive(process.pid), true);
+  assert.equal(processIsAlive(0), false);
+  assert.equal(processIsAlive(99999999), false);
+});
+test("native tunnel supervisor rejects Linux PID reuse with differing birth token", () => {
+  if (process.platform !== "linux") return;
+  assert.equal(processIsAlive(process.pid, "0"), false);
+  const threads = readdirSync("/proc/self/task").map(Number).filter((tid) => tid !== process.pid);
+  for (const tid of threads) assert.equal(processIsAlive(tid), false);
+});
+''')
 print("CLOUD9_SOURCE_OVERLAY_APPLIED")

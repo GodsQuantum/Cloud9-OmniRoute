@@ -21,7 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Public privacy, cleaned PNG icons, 4 lockfile SHA256 values
-        run: python3 tests/privacy.py
+        run: |
+          python3 tests/privacy.py
+          python3 -m unittest discover -s tests
       - name: Select official latest stable (never upstream dev branch)
         id: stable
         env:
@@ -42,14 +44,6 @@ jobs:
           set -euo pipefail
           git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/cheaper-inference/OmniRoute.git upstream
           cd upstream
-          if git apply --check ../overlays/cleanroom-csp-forward.patch; then
-            git apply ../overlays/cleanroom-csp-forward.patch
-            echo CLOUD9_CLEANROOM_CSP_PATCH_APPLIED
-          elif git apply --reverse --check ../overlays/cleanroom-csp-forward.patch; then
-            echo CLOUD9_CLEANROOM_CSP_ALREADY_UPSTREAM
-          else
-            echo CLOUD9_CLEANROOM_CSP_UPSTREAM_CONFLICT; exit 1
-          fi
           python3 ../overlays/apply-cloud9-source-compat.py .
           git diff --check
           grep -Fq OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS open-sse/executors/default/oneMinToolReplay.ts
@@ -66,11 +60,12 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --no-audit --no-fund
+          tests=(tests/unit/cloud9-source-overlay.test.ts tests/unit/cloud9-tunnel-supervisor-lease.test.ts tests/unit/chatgpt-web-first-party-cleanroom.test.ts)
+          if test -f tests/unit/antigravity-image-multi-reference.test.ts; then
+            tests+=(tests/unit/antigravity-image-multi-reference.test.ts)
+          fi
           node --import tsx/esm --import ./open-sse/utils/setupPolyfill.ts \
-            --test --test-force-exit \
-            tests/unit/cloud9-source-overlay.test.ts \
-            tests/unit/cloud9-tunnel-supervisor-lease.test.ts \
-            tests/unit/chatgpt-web-first-party-cleanroom.test.ts
+            --test --test-force-exit "${tests[@]}"
           echo CLOUD9_OMNIROUTE_SOURCE_AND_CLEANROOM_UNIT_TESTS_PASS
   build:
     needs: verify
@@ -86,11 +81,6 @@ jobs:
           set -euo pipefail
           git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/cheaper-inference/OmniRoute.git upstream
           cd upstream
-          if git apply --check ../overlays/cleanroom-csp-forward.patch; then
-            git apply ../overlays/cleanroom-csp-forward.patch
-          elif ! git apply --reverse --check ../overlays/cleanroom-csp-forward.patch; then
-            echo CLOUD9_CLEANROOM_CSP_UPSTREAM_CONFLICT; exit 1
-          fi
           python3 ../overlays/apply-cloud9-source-compat.py .
           git diff --check
       - uses: docker/setup-buildx-action@v3

@@ -3,7 +3,7 @@
 Non-destructive to production; exact upstream TypeScript anchors, idempotent,
 fail-closed on drift. Build and E2E tests are separate release gates.
 """
-import pathlib,sys
+import pathlib,sys,subprocess
 if len(sys.argv)!=2:raise SystemExit("usage: apply-cloud9-source-compat.py <upstream worktree>")
 root=pathlib.Path(sys.argv[1]).resolve()
 if not (root/"open-sse/executors/default.ts").is_file():
@@ -26,6 +26,32 @@ def add(name,body):
     p.parent.mkdir(exist_ok=True,parents=True)
     p.write_text(body)
     print("SOURCE_HELPER_CREATED",name)
+
+# Prefer upstream implementations once they satisfy the same contract. Keep the
+# legacy patch available for older stable tags; unknown layouts still fail closed.
+csp_source=(root/"open-sse/utils/chatgptWebFirstParty.ts").read_text()
+native_csp=all(marker in csp_source for marker in (
+    "async function evaluateAcrossNavigation",
+    "export async function assertChatGptWebSignedIn",
+    "export function buildChatGptWebBridgeInstallerSource",
+    "const installerSource = buildChatGptWebBridgeInstallerSource(",
+    "await assertChatGptWebSignedIn(page);",
+))
+if native_csp:
+    bridge=csp_source.split("async function ensureFirstPartyBridge",1)[1].split("const PICKER_FAMILY_SLUGS",1)[0]
+    if "new Blob(" in bridge or "URL.createObjectURL(" in bridge:
+        raise RuntimeError("Upstream Cleanroom no longer satisfies the native CSP contract")
+    print("CLOUD9_CLEANROOM_CSP_NATIVE_UPSTREAM")
+else:
+    patch=pathlib.Path(__file__).resolve().with_name("cleanroom-csp-forward.patch")
+    command=["git","-C",str(root),"apply"]
+    if subprocess.run(command+["--check",str(patch)],capture_output=True).returncode==0:
+        subprocess.run(command+[str(patch)],check=True)
+        print("CLOUD9_CLEANROOM_CSP_PATCH_APPLIED")
+    elif subprocess.run(command+["--reverse","--check",str(patch)],capture_output=True).returncode==0:
+        print("CLOUD9_CLEANROOM_CSP_ALREADY_APPLIED")
+    else:
+        raise RuntimeError("CLOUD9_CLEANROOM_CSP_UPSTREAM_CONFLICT")
 
 # 1min.AI's strict OpenAI-compatible endpoint rejects tool *response* message
 # name attributes; other providers keep the upstream ensureToolMessageNames()
@@ -64,10 +90,19 @@ change("open-sse/executors/default.ts",
     withDefaults = normalizeOneMinToolResults(withDefaults, this.provider ?? "");
     withDefaults = this.applyJsonSchemaFallback(withDefaults);''')
 
-# Preserve the existing single-image aliases (imageBytes/image_url/imageUrl),
-# support 1-4 inline multi-reference images without fetching URLs or weakening
-# upstream SSRF protections.
-multi='''/** Cloud9: validate one-to-four inline image_urls, no remote fetching. */
+# Upstream v3.8.54 supports inline reference lists natively (including edits).
+gemini_source=(root/"open-sse/handlers/imageGeneration/providers/geminiInline.ts").read_text()
+native_gemini="export function buildGeminiImageUserParts(" in gemini_source
+if native_gemini:
+    handler=(root/"open-sse/handlers/imageGeneration.ts").read_text()
+    if "geminiInline.buildGeminiImageUserParts(body, promptText)" not in handler:
+        raise RuntimeError("Native Gemini multi-reference helper is not wired into dispatch")
+    print("CLOUD9_GEMINI_MULTI_REFERENCE_NATIVE_UPSTREAM")
+else:
+    # Preserve the existing single-image aliases (imageBytes/image_url/imageUrl),
+    # support 1-4 inline multi-reference images without fetching URLs or weakening
+    # upstream SSRF protections.
+    multi='''/** Cloud9: validate one-to-four inline image_urls, no remote fetching. */
 export function geminiInlineMultiImageParts(
   body: unknown
 ): {
@@ -94,36 +129,37 @@ export function geminiInlineMultiImageParts(
 }
 
 '''
-before='''/**
+    before='''/**
  * Error message when the request carries a reference image that cannot be inlined (9router #5190).
 '''
-change("open-sse/handlers/imageGeneration/providers/geminiInline.ts",
-       before,multi+before)
-change("open-sse/handlers/imageGeneration.ts",
-'''  geminiInlineImagePart,
+    change("open-sse/handlers/imageGeneration/providers/geminiInline.ts",
+           before,multi+before)
+    change("open-sse/handlers/imageGeneration.ts",
+    '''  geminiInlineImagePart,
   geminiReferenceImageError,
 } from "./imageGeneration/providers/geminiInline.ts";''',
-'''  geminiInlineImagePart,
+    '''  geminiInlineImagePart,
   geminiInlineMultiImageParts,
   geminiReferenceImageError,
 } from "./imageGeneration/providers/geminiInline.ts";''')
-change("open-sse/handlers/imageGeneration.ts",
-'''  const referenceError = geminiReferenceImageError(body);
+    change("open-sse/handlers/imageGeneration.ts",
+    '''  const referenceError = geminiReferenceImageError(body);
   if (referenceError) {
     return saveImageErrorResult({''',
-'''  const multiReference = geminiInlineMultiImageParts(body);
+    '''  const multiReference = geminiInlineMultiImageParts(body);
   const referenceError = multiReference.error || geminiReferenceImageError(body);
   if (referenceError) {
     return saveImageErrorResult({''')
-change("open-sse/handlers/imageGeneration.ts",
-'''  const inlineImage = geminiInlineImagePart(body);
+    change("open-sse/handlers/imageGeneration.ts",
+    '''  const inlineImage = geminiInlineImagePart(body);
   const antigravityBody = {''',
-'''  const inlineImage = geminiInlineImagePart(body);
+    '''  const inlineImage = geminiInlineImagePart(body);
   const imageParts = multiReference.parts ?? (inlineImage ? [inlineImage] : []);
   const antigravityBody = {''')
-change("open-sse/handlers/imageGeneration.ts",
-'''          parts: [...(inlineImage ? [inlineImage] : []), { text: promptText }],''',
-'''          parts: [...imageParts, { text: promptText }],''')
+    change("open-sse/handlers/imageGeneration.ts",
+    '''          parts: [...(inlineImage ? [inlineImage] : []), { text: promptText }],''',
+    '''          parts: [...imageParts, { text: promptText }],''')
+
 change("open-sse/handlers/imageGeneration.ts",
 '''      generationConfig: {
         candidateCount,
@@ -135,7 +171,7 @@ change("open-sse/handlers/imageGeneration.ts",
         imageConfig: {
           aspectRatio,''')
 
-add("tests/unit/cloud9-source-overlay.test.ts",'''import test from "node:test";
+overlay_tests='''import test from "node:test";
 import assert from "node:assert/strict";
 import { geminiInlineMultiImageParts } from "../../open-sse/handlers/imageGeneration/providers/geminiInline.ts";
 import { normalizeOneMinToolResults } from "../../open-sse/executors/default/oneMinToolReplay.ts";
@@ -170,7 +206,42 @@ test("Cloud9 1min tool repair strips tool name only for exact provider", () => {
   if (previous === undefined) delete process.env.OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS;
   else process.env.OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS = previous;
 });
-''')
+'''
+if native_gemini:
+    overlay_tests=overlay_tests.replace(
+        "import { geminiInlineMultiImageParts }",
+        "import { buildGeminiImageUserParts }",
+    )
+    first=overlay_tests.index('test("Cloud9 Gemini')
+    strict=overlay_tests.index('test("Cloud9 1min')
+    overlay_tests=overlay_tests[:first]+'''test("Cloud9 four distinct Gemini references use native dispatch in caller order", () => {
+  const images = [1,2,3,4].map(n => "data:image/png;base64," + Buffer.alloc(96, n).toString("base64"));
+  const result = buildGeminiImageUserParts({ image_urls: images }, "portrait");
+  assert.ok(!("error" in result));
+  assert.equal(result.referenceCount, 4);
+  assert.equal(result.parts.length, 5);
+  images.forEach((image, i) => assert.equal((result.parts[i] as any).inlineData.data, image.split(",")[1]));
+});
+test("Cloud9 native Gemini rejects remote references and keeps text-only generation", () => {
+  const remote = buildGeminiImageUserParts({ image_urls: ["https://example.test/a.png"] }, "portrait");
+  assert.ok("error" in remote);
+  assert.match(remote.error, /Remote reference/);
+  const plain = buildGeminiImageUserParts({ prompt: "text only" }, "text only");
+  assert.ok(!("error" in plain));
+  assert.equal(plain.referenceCount, 0);
+  assert.deepEqual(plain.parts, [{ text: "text only" }]);
+});
+'''+overlay_tests[strict:]
+overlay_tests+='''\nimport { isDedicatedCodexImageModel } from "../../src/sse/services/codexImageInventory.ts";
+test("Cloud9 image inventory exception stays limited to dedicated Codex images", () => {
+  for (const id of ["gpt-image-2","gpt-image-2.5-sunburst","codex/gpt-image-2.5-flare"])
+    assert.equal(isDedicatedCodexImageModel("codex",id),true);
+  for (const id of ["gpt-6-luna","gpt-image-2.5-unknown","gpt-image-2x5-sunburst"])
+    assert.equal(isDedicatedCodexImageModel("codex",id),false);
+  assert.equal(isDedicatedCodexImageModel("chatgpt","gpt-image-2"),false);
+});
+'''
+add("tests/unit/cloud9-source-overlay.test.ts",overlay_tests)
 
 # Dedicated Codex image routes bypass account-model inventory only;
 # OAuth, quota and all other eligibility checks remain in upstream code.
@@ -184,16 +255,23 @@ change("src/sse/services/auth.ts",
 '''import { isPerAccountCatalogProvider } from "./perAccountCatalogFilter.ts";''',
 '''import { isPerAccountCatalogProvider } from "./perAccountCatalogFilter.ts";
 import { isDedicatedCodexImageModel } from "./codexImageInventory.ts";''')
-change("src/sse/services/auth.ts",
-'''      if (
+inventory_anchor='''      if (
         requestedModel &&
         ((c.provider === "codex" && advertisedModelsByConnection.get(c.id)?.size === 0) ||
-          !isRequestedModelAdvertised(''',
-'''      if (
+          !isRequestedModelAdvertised('''
+inventory_anchor_v54='''      if (
         requestedModel &&
-        !isDedicatedCodexImageModel(c.provider, requestedModel) &&
-        ((c.provider === "codex" && advertisedModelsByConnection.get(c.id)?.size === 0) ||
-          !isRequestedModelAdvertised(''')
+        (((c.provider === "codex" || c.provider === "chatgpt") &&
+          advertisedModelsByConnection.get(c.id)?.size === 0) ||
+          !isRequestedModelAdvertised('''
+auth_source=(root/"src/sse/services/auth.ts").read_text()
+if inventory_anchor not in auth_source and (
+    inventory_anchor_v54 in auth_source or
+    inventory_anchor_v54.replace("requestedModel &&","requestedModel &&\n        !isDedicatedCodexImageModel(c.provider, requestedModel) &&",1) in auth_source
+):
+    inventory_anchor=inventory_anchor_v54
+change("src/sse/services/auth.ts",inventory_anchor,
+       inventory_anchor.replace("requestedModel &&","requestedModel &&\n        !isDedicatedCodexImageModel(c.provider, requestedModel) &&",1))
 
 # CLOUD9_NATIVE_SUPERVISOR_PID_REUSE:
 # The original lease only checks kill(pid, 0). After a container restart that

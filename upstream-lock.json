@@ -1,7 +1,7 @@
 {
   "schema": "cloud9-omniroute-upstream-overlay-v2",
   "upstream_repo": "cheaper-inference/OmniRoute",
-  "stable_tag": "v3.8.53",
+  "stable_tag": "v3.8.54",
   "source_repo": "GodsQuantum/Cloud9-OmniRoute",
   "patches": [
     {
@@ -10,7 +10,7 @@
     },
     {
       "file": "overlays/apply-cloud9-source-compat.py",
-      "sha256": "83b836d7846793718b3aad8b0d797e54c621d03b75c22ef3fb4e52b53f486e1a"
+      "sha256": "5ca768080ddfe67b593c8d0befbcfc3bbfd9e0345a016cc0c2e3c6af89842ef1"
     },
     {
       "file": "overlays/cleanroom-csp-forward.patch",

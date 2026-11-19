@@ -20,7 +20,7 @@ jobs:
       tag: ${{ steps.stable.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Public privacy, cleaned PNG icons, 4 lockfile SHA256 values
+      - name: Public privacy, cleaned PNG icons, complete overlay SHA256 lock
         run: |
           python3 tests/privacy.py
           python3 -m unittest discover -s tests
@@ -48,7 +48,8 @@ jobs:
           git diff --check
           grep -Fq OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS open-sse/executors/default/oneMinToolReplay.ts
           test -f tests/unit/cloud9-source-overlay.test.ts
-          echo OMNIROUTE_FOUR_OVERLAYS_VERSION_CHECK_PASS
+          test -f tests/unit/combo-context-pin-budget.test.ts
+          echo OMNIROUTE_OVERLAYS_VERSION_CHECK_PASS
       - uses: actions/setup-node@v4
         with:
           node-version: "26"
@@ -61,11 +62,29 @@ jobs:
           set -euo pipefail
           npm ci --no-audit --no-fund
           tests=(tests/unit/cloud9-source-overlay.test.ts tests/unit/cloud9-tunnel-supervisor-lease.test.ts tests/unit/chatgpt-web-first-party-cleanroom.test.ts)
+          tests+=(
+            tests/unit/combo-context-pin-budget.test.ts
+            tests/unit/combo-dispatch-prelude.test.ts
+            tests/unit/combo-pinned-connection-binding.test.ts
+            tests/unit/combo-pin-health-gate.test.ts
+            tests/unit/combo-agentic-stall-failover.test.ts
+            tests/unit/combo-process-pressure-terminal.test.ts
+            tests/unit/combo-quota-exhaustion-only-fallback.test.ts
+            tests/unit/combo-loop-safety-timer-cleanup.test.ts
+            tests/unit/combo-target-timeout-runner.test.ts
+            tests/unit/combo-target-stream-first-output.test.ts
+            tests/unit/combo-declared-first-output-wiring.test.ts
+            tests/unit/combo/combo-target-exhaustion.test.ts
+            tests/unit/combo/execute-target-attempt.test.ts
+            tests/unit/combo/combo-attempt-loop.test.ts
+            tests/unit/combo/combo-set-retry-durable-exhaustion.test.ts
+          )
           if test -f tests/unit/antigravity-image-multi-reference.test.ts; then
             tests+=(tests/unit/antigravity-image-multi-reference.test.ts)
           fi
-          node --import tsx/esm --import ./open-sse/utils/setupPolyfill.ts \
-            --test --test-force-exit "${tests[@]}"
+          DISABLE_SQLITE_AUTO_BACKUP=true node --import tsx/esm \
+            --import ./open-sse/utils/setupPolyfill.ts --import ./tests/_setup/isolateDataDir.ts \
+            --test --test-force-exit --test-concurrency=2 "${tests[@]}"
           echo CLOUD9_OMNIROUTE_SOURCE_AND_CLEANROOM_UNIT_TESTS_PASS
   build:
     needs: verify

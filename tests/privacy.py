@@ -19,7 +19,10 @@ for name in files:
   bad.append(name)
 assert not bad,('PRIVATE_IDENTIFIERS_IN_PUBLIC_SOURCE',bad)
 lock=json.loads((root/'upstream-lock.json').read_text())
-patches=lock['patches'];assert len(patches)==4
+patches=lock['patches'];assert len(patches)>=4
+patch_files={x['file'] for x in patches}
+assert len(patch_files)==len(patches)
+assert patch_files=={name for name in files if name.startswith('overlays/')}
 assert all(hashlib.sha256((root/x['file']).read_bytes()).hexdigest()==x['sha256'] for x in patches)
 for name in ('docs/logo.svg','docs/architecture.svg'):ET.parse(root/name)
 for name in ('README.md','README.fr.md','README.zh-CN.md','LICENSE'):assert (root/name).is_file()
@@ -37,4 +40,4 @@ for name in ('cloud9-engine.png','cloud9-speaches.png'):
 code=(root/'overlays/apply-cloud9-source-compat.py').read_text()
 assert 'OMNIROUTE_STRICT_TOOL_RESPONSE_PROVIDERS' in code
 assert '68f04eeb-180b' not in code
-print('OMNIROUTE_PUBLIC_HISTORY_AND_FOUR_OVERLAYS_PRIVACY_ICONS_LOCK_EN_FR_ZH_PASS')
+print('OMNIROUTE_PUBLIC_OVERLAYS_PRIVACY_ICONS_LOCK_EN_FR_ZH_PASS')

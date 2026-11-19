@@ -10,7 +10,7 @@
     },
     {
       "file": "overlays/apply-cloud9-source-compat.py",
-      "sha256": "5ca768080ddfe67b593c8d0befbcfc3bbfd9e0345a016cc0c2e3c6af89842ef1"
+      "sha256": "720a57f6eb9351a8a46eb2d42b10eba9349970bd97e973fe06cd14fae779201d"
     },
     {
       "file": "overlays/cleanroom-csp-forward.patch",
@@ -19,6 +19,10 @@
     {
       "file": "overlays/patch-cloud9-provider-branding.js",
       "sha256": "50021468b2b1eba767d222bb34bf004ea8f3e75c6d6b17afa570d17f8b043350"
+    },
+    {
+      "file": "overlays/context-pin-budget.patch",
+      "sha256": "804e52f9096e3837aaf6c2793168536373bb3f9e069291d33ad6bc5ce460a25a"
     }
   ],
   "build": "Official runner-web plus source-level overlays, strict provider env and Cloud9 assets",

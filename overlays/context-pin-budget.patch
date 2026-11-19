@@ -1,0 +1,1599 @@
+diff --git a/open-sse/services/combo.ts b/open-sse/services/combo.ts
+index 67b15a1a..d7b508d0 100644
+--- a/open-sse/services/combo.ts
++++ b/open-sse/services/combo.ts
+@@ -169,9 +169,14 @@ import {
+ } from "./combo/truncatedStreamFailover.ts";
+ import { evaluateExecuteTargetGates } from "./combo/executeTargetGates.ts";
+ import { executeTargetAttempt } from "./combo/executeTargetAttempt.ts";
+-import type { AttemptLoopDeps, AttemptLoopState } from "./combo/attemptLoopTypes.ts";
++import type {
++  AttemptLoopDeps,
++  AttemptLoopState,
++  CompletedTargetAttempt,
++} from "./combo/attemptLoopTypes.ts";
+ import { clearStaleLKGP } from "./combo/staleLkgpClear.ts";
+ import { getStrategyTraits } from "./combo/strategyRegistry.ts";
++import { runContextPinPrelude } from "./combo/contextPinAttempt.ts";
+ 
+ // Native Codex auto-resume (#13180) rejection reasons that mean the turn either carries
+ // state unsafe to hand to an untested alternate model (pending tool calls, opaque
+@@ -900,6 +905,16 @@ async function handleComboChatInner({
+           ? errorResponse(499, "Client disconnected")
+           : handleSingleModel(...dispatchArgs)
+     : handleSingleModel;
++  const comboTimeoutMs = config.comboTimeoutMs || 0;
++  const comboStartTime = Date.now();
++  const completedPin: { current?: CompletedTargetAttempt } = {};
++  const finishPrelude = (response: Response): Response => {
++    if (completedPin.current) {
++      void completedPin.current.response.body?.cancel().catch(() => {});
++      completedPin.current = undefined;
++    }
++    return response;
++  };
+   const handleSingleModelWithTimeout = buildTargetTimeoutRunner({
+     handleSingleModel: guardedHandleSingleModel,
+     comboTargetTimeoutMs,
+@@ -921,20 +936,28 @@ async function handleComboChatInner({
+   // combo/dispatchPrelude.ts; only the chaos + round-robin hand-offs are short
+   // enough to stay inline.
+   if (pinnedModel && !hasAccountPreferences) {
+-    const pinnedDispatch = await tryPinnedModelDispatch({
+-      body,
+-      combo,
+-      pinnedModel,
+-      allCombos,
+-      config,
+-      clientRequestedStream,
+-      handleSingleModelWithTimeout,
+-      log,
+-      hiddenModelsByProvider,
+-      preContentTransportRecovery: resilienceSettings.streamRecovery.enabled === true,
++    const pinnedDispatch = await runContextPinPrelude({
++      deadline: comboTimeoutMs > 0 ? comboStartTime + comboTimeoutMs : null,
+       signal,
++      run: (pinSignal) =>
++        tryPinnedModelDispatch({
++          body,
++          combo,
++          pinnedModel,
++          allCombos,
++          config,
++          clientRequestedStream,
++          handleSingleModelWithTimeout,
++          log,
++          hiddenModelsByProvider,
++          preContentTransportRecovery: resilienceSettings.streamRecovery.enabled === true,
++          signal: pinSignal,
++          onFallbackAttempt: (attempt) => {
++            completedPin.current = attempt;
++          },
++        }),
+     });
+-    if (pinnedDispatch) return pinnedDispatch;
++    if (pinnedDispatch) return finishPrelude(pinnedDispatch);
+   }
+ 
+   const cfg = config as Record<string, unknown>;
+@@ -963,7 +986,7 @@ async function handleComboChatInner({
+     requestHeaders,
+     runCombo: (nestedOptions) => handleComboChat({ ...nestedOptions, endpointCapability }),
+   });
+-  if (fusionDispatch) return fusionDispatch;
++  if (fusionDispatch) return finishPrelude(fusionDispatch);
+ 
+   // Chaos mode (parallel multi-model dispatch): detection + dispatch live in
+   // chaosEngine.ts (dispatchChaosFromCombo), returning null when not chaos-enabled.
+@@ -992,7 +1015,7 @@ async function handleComboChatInner({
+   if (chaosDispatch) {
+     const response = await chaosDispatch;
+     await chaosHeaders?.wait();
+-    return response;
++    return finishPrelude(response);
+   }
+ 
+   const pipelineDispatch = hasAccountPreferences
+@@ -1009,7 +1032,7 @@ async function handleComboChatInner({
+         log,
+         hiddenModelsByProvider,
+       });
+-  if (pipelineDispatch) return pipelineDispatch;
++  if (pipelineDispatch) return finishPrelude(pipelineDispatch);
+   const runtimeUnitDispatch = await tryRuntimeUnitDispatch({
+     invocationId: traceInvocationId,
+     body,
+@@ -1036,7 +1059,7 @@ async function handleComboChatInner({
+     requestHeaders,
+     runCombo: (nestedOptions) => handleComboChat({ ...nestedOptions, endpointCapability }),
+   });
+-  if (runtimeUnitDispatch) return runtimeUnitDispatch;
++  if (runtimeUnitDispatch) return finishPrelude(runtimeUnitDispatch);
+ 
+   let activeNativeTurnPin = clientManagedResponsesContext
+     ? getNativeCodexTurnPin(body, combo.name)
+@@ -1051,9 +1074,11 @@ async function handleComboChatInner({
+       parseAutoConfig(combo, []).accountPreferences
+     ) === 3
+   ) {
+-    return errorResponse(
+-      503,
+-      "The account bound to this turn is excluded by this combo. Start a new turn or remove the exclusion."
++    return finishPrelude(
++      errorResponse(
++        503,
++        "The account bound to this turn is excluded by this combo. Start a new turn or remove the exclusion."
++      )
+     );
+   }
+ 
+@@ -1084,7 +1109,7 @@ async function handleComboChatInner({
+       perTargetAdmission,
+       heldAttempt,
+     });
+-    return resolveHeldTruncatedResponse(heldAttempt, roundRobinResponse);
++    return finishPrelude(resolveHeldTruncatedResponse(heldAttempt, roundRobinResponse));
+   }
+ 
+   // Native Codex turns must stay on their pinned target, but a pre-content
+@@ -1114,7 +1139,7 @@ async function handleComboChatInner({
+     hiddenModelsByProvider,
+     traceInvocationId,
+   });
+-  if ("earlyResponse" in targetResolution) return targetResolution.earlyResponse;
++  if ("earlyResponse" in targetResolution) return finishPrelude(targetResolution.earlyResponse);
+   const { stickyWeightedLimit, getWeightedStepKeyForTarget, preScreenMap, compatRejectedTargets } =
+     targetResolution;
+   const _sticky = targetResolution.sticky;
+@@ -1193,7 +1218,7 @@ async function handleComboChatInner({
+           if (retryResponse) {
+             targetResolution.quotaShareRelease?.();
+             log.warn("COMBO", "Pinned model temporarily unavailable; preserving turn for retry");
+-            return retryResponse;
++            return finishPrelude(retryResponse);
+           }
+           // These specific rejection reasons mean the turn carries state (pending
+           // tool calls, opaque provider-specific continuation state) or has
+@@ -1206,7 +1231,7 @@ async function handleComboChatInner({
+             "COMBO",
+             `Native Codex turn cannot continue: pinned model ${activeNativeTurnPin.modelStr} is unavailable (model-scoped); auto-resume rejected (${autoResumeEligibility.reason}); model lock: ${describePinnedTargetsLock(pinnedTargets)}; preserving turn pin and terminating turn`
+           );
+-          return createPinnedModelUnavailableResponse();
++          return finishPrelude(createPinnedModelUnavailableResponse());
+         } else {
+           // Every other rejection reason (e.g. the request body does not carry
+           // the Responses-API `input`/`messages` shape #13180's eligibility
+@@ -1238,7 +1263,7 @@ async function handleComboChatInner({
+           );
+           if (!completed) {
+             targetResolution.quotaShareRelease?.();
+-            return errorResponse(499, "Request aborted");
++            return finishPrelude(errorResponse(499, "Request aborted"));
+           }
+         }
+       }
+@@ -1253,7 +1278,7 @@ async function handleComboChatInner({
+   // sequence alongside pool size + exhaustion reasons. Accumulates across set retries.
+   const comboAttemptOrder: Array<{ provider: string; model: string }> = [];
+ 
+-  if (orderedTargets.length === 0) {
++  if (orderedTargets.length === 0 && !completedPin.current) {
+     // Surface a recovery hint + auto-clear the session pin after enough consecutive
+     // no-target failures (silent-stop fix). Threshold of 3 prevents a one-off account
+     // wipe from destroying the prompt-cache pin benefit on the next request.
+@@ -1304,9 +1329,6 @@ async function handleComboChatInner({
+         (pinnedLockWaitMs > 0 ? pinnedLockWaitMs + PINNED_LOCK_WAIT_SLACK_MS : 0)
+     ),
+   };
+-  const comboTimeoutMs = config.comboTimeoutMs || 0;
+-  const comboStartTime = Date.now();
+-
+   const state: AttemptLoopState = {
+     orderedTargets,
+     fallbackCount: 0,
+@@ -1389,7 +1411,9 @@ async function handleComboChatInner({
+     evaluateGates: evaluateExecuteTargetGates,
+     executeAttempt: executeTargetAttempt,
+     compatRejectedTargets,
++    completedPinAttempt: completedPin.current,
+   };
++  completedPin.current = undefined;
+ 
+   // FASE 2.1: acquire the per-connection concurrency slot for the selected
+   // quota-share target once, around the whole dispatch (including any
+diff --git a/open-sse/services/combo/dispatchPrelude.ts b/open-sse/services/combo/dispatchPrelude.ts
+index 908452db..83629bef 100644
+--- a/open-sse/services/combo/dispatchPrelude.ts
++++ b/open-sse/services/combo/dispatchPrelude.ts
+@@ -80,6 +80,7 @@ import type {
+   SingleModelTarget,
+ } from "./types.ts";
+ import type { PerTargetAdmissionHook } from "../admission/types.ts";
++import type { CompletedTargetAttempt } from "./attemptLoopTypes.ts";
+ 
+ type ComboSetupConfig = ReturnType<typeof resolveComboSetupConfig>;
+ type RunCombo = (options: HandleComboChatOptions) => Promise<Response>;
+@@ -240,11 +241,6 @@ export function buildDefaultNesting(
+   );
+ }
+ 
+-/** True once the client went away while pre-content transport recovery is in charge. */
+-function recoveryAborted(recovery: boolean | undefined, signal?: AbortSignal | null): boolean {
+-  return recovery === true && signal?.aborted === true;
+-}
+-
+ /**
+  * Decide whether the honored pin's response is good enough to return as-is.
+  * Returns the response to serve it, or null to fall through to the combo
+@@ -260,6 +256,9 @@ async function evaluatePinnedResponse(args: {
+   log: ComboLogger;
+   preContentTransportRecovery?: boolean;
+   signal?: AbortSignal | null;
++  onFallback?: (
++    facts: Pick<CompletedTargetAttempt, "failure" | "quality" | "agenticStall">
++  ) => void;
+ }): Promise<Response | null> {
+   const {
+     body,
+@@ -279,12 +278,12 @@ async function evaluatePinnedResponse(args: {
+       clientRequestedStream,
+       log,
+       config.responseValidation,
+-      preContentTransportRecovery ? signal : null,
++      signal,
+       await isTrustedEmptyTurn(parseModel(pinnedModel).provider, pinnedResult),
+       preContentTransportRecovery
+     );
+     releaseQualityClone(pinnedClone, pinnedResult, pinnedQuality);
+-    if (recoveryAborted(preContentTransportRecovery, signal)) {
++    if (signal?.aborted) {
+       void pinnedQuality.clonedResponse?.body?.cancel().catch(() => {});
+       releaseRejectedQualityResponse(pinnedClone, pinnedResult);
+       return errorResponse(499, "Client disconnected");
+@@ -300,18 +299,23 @@ async function evaluatePinnedResponse(args: {
+         log,
+       }));
+     if (pinnedQuality.valid && !pinnedStalled) return pinnedResult;
+-    releaseRejectedQualityResponse(pinnedClone, pinnedResult);
++    if (!pinnedStalled || !args.onFallback) {
++      releaseRejectedQualityResponse(pinnedClone, pinnedResult);
++    }
++    args.onFallback?.({
++      quality: {
++        valid: pinnedQuality.valid,
++        reason: pinnedQuality.reason,
++        upstreamFailure: pinnedQuality.upstreamFailure,
++      },
++      agenticStall: pinnedStalled,
++    });
+     log.warn(
+       "COMBO",
+       `Pinned model ${pinnedModel} returned 200 but ${pinnedStalled ? AGENTIC_STALL_COMBO_REASON : `failed quality check: ${pinnedQuality.reason}`}, falling through to combo retry/fallback`
+     );
+     return null;
+   }
+-  if (
+-    pinnedResult.status === 503 &&
+-    isLocalProcessPressureResponse(pinnedResult, (await readAttemptFailure(pinnedResult)).errorBody)
+-  )
+-    return pinnedResult;
+   const pinnedStatus = pinnedResult.status || 500;
+   // 402 must fall through like 401: handleNoCredentials() surfaces a
+   // credits-exhausted account as 402 (#12441 kept 401 for expired/banned), and
+@@ -321,6 +325,17 @@ async function evaluatePinnedResponse(args: {
+   if (![401, 402, 408, 429, 500, 502, 503, 504].includes(pinnedStatus)) {
+     return pinnedResult;
+   }
++  const failure = await readAttemptFailure(pinnedResult, { log, modelStr: pinnedModel });
++  if (signal?.aborted) {
++    releaseRejectedQualityResponse(pinnedResult, pinnedResult);
++    return errorResponse(499, "Client disconnected");
++  }
++  if (
++    pinnedResult.status === 503 &&
++    isLocalProcessPressureResponse(pinnedResult, failure.errorBody)
++  )
++    return pinnedResult;
++  args.onFallback?.({ failure });
+   log.warn(
+     "COMBO",
+     `Pinned model ${pinnedModel} failed (${pinnedStatus}), falling through to combo retry/fallback`
+@@ -376,6 +391,7 @@ async function dispatchHonoredPin(args: {
+   log: ComboLogger;
+   preContentTransportRecovery: boolean;
+   signal?: AbortSignal | null;
++  onFallbackAttempt?: (attempt: CompletedTargetAttempt) => void;
+ }): Promise<Response | null> {
+   const {
+     body,
+@@ -390,13 +406,28 @@ async function dispatchHonoredPin(args: {
+     preContentTransportRecovery,
+     signal,
+   } = args;
++  const startedAt = Date.now();
++  const pinnedTarget = comboTargets.find((target) => target.modelStr === pinnedModel);
++  const parsedPin = parseModel(pinnedModel);
++  const target: ResolvedComboTarget = {
++    kind: "model",
++    stepId: pinnedModel,
++    executionKey: pinnedModel,
++    modelStr: pinnedModel,
++    provider: parsedPin.provider || "unknown",
++    providerId: parsedPin.provider || null,
++    weight: 1,
++    label: null,
++    ...pinnedTarget,
++    connectionId: connectionBinding.connectionId ?? null,
++    allowedConnectionIds: connectionBinding.allowedConnectionIds ?? null,
++  };
+   let pinnedResult: Response | null = null;
+   try {
+     // #5501: the combo system_message also expands on the pinned context path —
+     // a session pin bypasses the main loop, so without this the template would
+     // go literal from the second in-session request on. Target context comes
+     // from the pinned model's resolved combo target when available.
+-    const pinnedTarget = comboTargets.find((t) => t.modelStr === pinnedModel);
+     const pinnedBody = expandComboSystemPromptIfPresent(body, combo, {
+       modelId: pinnedModel,
+       providerId: pinnedTarget && pinnedTarget.provider !== "unknown" ? pinnedTarget.provider : "",
+@@ -406,21 +437,21 @@ async function dispatchHonoredPin(args: {
+           : "",
+       fingerprint: pinnedTarget ? (resolveTargetFingerprint(pinnedTarget) ?? "") : "",
+     });
+-    if (recoveryAborted(preContentTransportRecovery, signal))
+-      return errorResponse(499, "Client disconnected");
++    if (signal?.aborted) return errorResponse(499, "Client disconnected");
+     pinnedResult = await handleSingleModelWithTimeout(pinnedBody, pinnedModel, {
+       ...connectionBinding,
+       modelPinned: true,
++      ...(signal ? { modelAbortSignal: signal } : {}),
+     } as SingleModelTarget);
+   } catch (pinErr) {
+-    if (recoveryAborted(preContentTransportRecovery, signal))
+-      return errorResponse(499, "Client disconnected");
++    if (signal?.aborted) return errorResponse(499, "Client disconnected");
++    pinnedResult = errorResponse(502, pinErr instanceof Error ? pinErr.message : String(pinErr));
+     log.warn(
+       "COMBO",
+       `Pinned model ${pinnedModel} threw error: ${pinErr instanceof Error ? pinErr.message : String(pinErr)}, falling through to combo retry/fallback`
+     );
+   }
+-  if (recoveryAborted(preContentTransportRecovery, signal)) {
++  if (signal?.aborted) {
+     if (pinnedResult) releaseRejectedQualityResponse(pinnedResult, pinnedResult);
+     return errorResponse(499, "Client disconnected");
+   }
+@@ -435,6 +466,15 @@ async function dispatchHonoredPin(args: {
+       log,
+       preContentTransportRecovery,
+       signal,
++      onFallback: args.onFallbackAttempt
++        ? (facts) =>
++            args.onFallbackAttempt!({
++              target,
++              response: pinnedResult!,
++              startedAt,
++              ...facts,
++            })
++        : undefined,
+     });
+     return accepted;
+   }
+@@ -458,6 +498,7 @@ export async function tryPinnedModelDispatch(args: {
+   hiddenModelsByProvider?: HiddenModelsByProvider;
+   preContentTransportRecovery?: boolean;
+   signal?: AbortSignal | null;
++  onFallbackAttempt?: (attempt: CompletedTargetAttempt) => void;
+ }): Promise<Response | null> {
+   const {
+     body,
+@@ -483,8 +524,7 @@ export async function tryPinnedModelDispatch(args: {
+   const preContentTransportRecovery =
+     clientRequestedStream && args.preContentTransportRecovery === true;
+   const signal = args.signal;
+-  if (recoveryAborted(preContentTransportRecovery, signal))
+-    return errorResponse(499, "Client disconnected");
++  if (signal?.aborted) return errorResponse(499, "Client disconnected");
+   const haveFullCombos = Array.isArray(allCombos) ? allCombos.length > 0 : !!allCombos;
+   // Eagerly resolve the combo's targets once (used for the pin-validity check AND
+   // #5501 template expansion). A non-authoritative allCombos (empty/missing)
+@@ -551,10 +591,12 @@ export async function tryPinnedModelDispatch(args: {
+       log,
+       preContentTransportRecovery,
+       signal,
++      onFallbackAttempt: args.onFallbackAttempt,
+     });
+     if (honored) return honored;
+     // Fall through to the target iteration loop below — retries and sibling
+     // models will be tried via the normal combo machinery.
++    return null;
+   }
+   log.warn(
+     "COMBO",
+diff --git a/open-sse/services/combo/attemptLoopTypes.ts b/open-sse/services/combo/attemptLoopTypes.ts
+index e6816200..d754b86d 100644
+--- a/open-sse/services/combo/attemptLoopTypes.ts
++++ b/open-sse/services/combo/attemptLoopTypes.ts
+@@ -13,6 +13,8 @@ import type { ContextRelayConfig, UniversalHandoffConfig } from "../contextHando
+ import type { ComboErrorEntry } from "./comboErrorAggregation.ts";
+ import type { ResetWindowConfig } from "./quotaScoring.ts";
+ import type { ResponseValidationConfig } from "./responseValidation.ts";
++import type { AttemptFailure } from "./attemptFailure.ts";
++import type { ResponseQualityResult } from "./validateQuality.ts";
+ import type { ApplyStickinessResult } from "./sessionStickiness.ts";
+ import type {
+   ComboLike,
+@@ -25,6 +27,18 @@ import type {
+ 
+ export type ExecuteTargetResult = { ok: boolean; response?: Response } | null;
+ 
++/** A real dispatch already completed by the context-pin prelude, never a replay request. */
++export type CompletedTargetAttempt = {
++  target: ResolvedComboTarget;
++  response: Response;
++  startedAt: number;
++  failure?: AttemptFailure;
++  quality?: Omit<ResponseQualityResult, "clonedResponse">;
++  agenticStall?: boolean;
++  /** No selected account and no exact native pool target identifies this pin dispatch. */
++  unidentifiedConnection?: boolean;
++};
++
+ export type AttemptLoopState = {
+   orderedTargets: ResolvedComboTarget[];
+   fallbackCount: number;
+@@ -157,4 +171,6 @@ export interface ExecuteTargetAttemptOptions {
+   targetForAttempt: ResolvedComboTarget;
+   profile: unknown;
+   protectedPriorityTarget: boolean;
++  /** Consumed only on retry zero; later retries use the normal upstream dispatcher. */
++  completedAttempt?: CompletedTargetAttempt;
+ }
+diff --git a/open-sse/services/combo/comboAttemptLoop.ts b/open-sse/services/combo/comboAttemptLoop.ts
+index 2148317e..c7c3dec5 100644
+--- a/open-sse/services/combo/comboAttemptLoop.ts
++++ b/open-sse/services/combo/comboAttemptLoop.ts
+@@ -9,6 +9,7 @@ import {
+   getEarliestRateLimitedUntil,
+   getModelLockoutInfo,
+   scanTransientModelLock,
++  getRuntimeProviderProfile,
+ } from "../accountFallback.ts";
+ import {
+   getCachedProviderConnectionById,
+@@ -68,7 +69,14 @@ import type { ResolvedComboTarget } from "./types.ts";
+ import { buildComboDiag } from "./executeTargetClassify.ts";
+ import { attemptCompatRejectedFallback } from "./comboCompatFallback.ts";
+ import { isProviderInCooldown } from "../providerCooldownTracker.ts";
+-import type { AttemptLoopDeps, AttemptLoopState, ExecuteTargetResult } from "./attemptLoopTypes.ts";
++import type {
++  AttemptLoopDeps,
++  AttemptLoopState,
++  CompletedTargetAttempt,
++  ExecuteTargetResult,
++  GateDecision,
++} from "./attemptLoopTypes.ts";
++import { prepareCompletedContextPin } from "./contextPinAttempt.ts";
+ import { getStrategyTraits } from "./strategyRegistry.ts";
+ import { resolveSkippedConnectionCooldownTerminal } from "./skippedConnectionCooldown.ts";
+ 
+@@ -205,6 +213,8 @@ export type DispatchWithCooldownRetryExtra = {
+   comboCooldownBudgetLeftMs: { current: number };
+   evaluateGates: typeof evaluateExecuteTargetGates;
+   executeAttempt: typeof executeTargetAttempt;
++  /** A pin already sent upstream; process its result once before ordinary availability gates. */
++  completedPinAttempt?: CompletedTargetAttempt;
+   /**
+    * #6238 last-resort tier: the targets the compat pre-filter rejected. Probed
+    * only when no compat-kept target was ever dispatched — the same guard the
+@@ -235,6 +245,14 @@ export async function dispatchWithCooldownRetry(opts: {
+   extra: DispatchWithCooldownRetryExtra;
+ }): Promise<Response> {
+   const { state, deps, extra } = opts;
++  const originalTargets = state.orderedTargets;
++  const preparedPin = extra.completedPinAttempt
++    ? prepareCompletedContextPin(originalTargets, extra.completedPinAttempt)
++    : null;
++  let completedPin = preparedPin?.attempt;
++  if (preparedPin) state.orderedTargets = preparedPin.targets;
++  // Cooldown re-entry must never consume the same completed response twice.
++  extra.completedPinAttempt = undefined;
+   // #7360: persist lastStatus/earliestRetryAfter across set retries; reset
+   // only on a fresh dispatch (including cooldown-aware re-dispatch).
+   state.lastError = null;
+@@ -268,6 +286,7 @@ export async function dispatchWithCooldownRetry(opts: {
+       state.earliestCircuitOpenRetryMs = 0;
+       state.skippedConnectionCooldownUntil = undefined;
+       if (setTry > 0) {
++        state.orderedTargets = originalTargets;
+         deps.log.info(
+           "COMBO",
+           `All targets failed — retrying set (${setTry}/${extra.maxSetRetries})`
+@@ -280,7 +299,7 @@ export async function dispatchWithCooldownRetry(opts: {
+         }
+       }
+ 
+-      deps.startTime = Date.now();
++      deps.startTime = completedPin?.startedAt ?? Date.now();
+       // Fallbacks within this set try: one per ordered target abandoned before
+       // the one that serves the request. Abandoning the FIRST target counts
+       // too — it equals the index of the target that ends up serving, i.e. the
+@@ -310,7 +329,9 @@ export async function dispatchWithCooldownRetry(opts: {
+       // target loop stops launching new work; the existing state.comboExpired branch
+       // returns the aggregated 504.
+       const loopSafetyMs =
+-        extra.comboTimeoutMs > 0 ? extra.comboTimeoutMs : COMBO_LOOP_SAFETY_TIMEOUT_MS;
++        extra.comboTimeoutMs > 0
++          ? Math.max(1, extra.comboStartTime + extra.comboTimeoutMs - Date.now())
++          : COMBO_LOOP_SAFETY_TIMEOUT_MS;
+       let loopSafetyFired = false;
+       let loopSafetyTimer: ReturnType<typeof setTimeout> | null = null;
+       const loopSafetyPromise = new Promise<Response>((resolve) => {
+@@ -388,7 +409,28 @@ export async function dispatchWithCooldownRetry(opts: {
+       }
+ 
+       const executeTarget = async (i: number): Promise<ExecuteTargetResult> => {
+-        const gate = await extra.evaluateGates({ index: i, state, deps });
++        const completedAttempt = i === 0 ? completedPin : undefined;
++        if (completedAttempt) completedPin = undefined;
++        const target = state.orderedTargets[i];
++        // The upstream already answered. A newly persisted cooldown must not
++        // hide that answer, its quota classification or its spent attempt budget.
++        const completedTarget = {
++          ...target,
++          modelAbortSignal: state.abortControllers.get(i)?.signal,
++          fallbackAttempts: 0,
++        };
++        const gate: GateDecision = completedAttempt
++          ? {
++              kind: "proceed",
++              targetForAttempt: completedTarget,
++              profile:
++                deps.preScreenMap.get(target.executionKey)?.profile ??
++                (await getRuntimeProviderProfile(target.provider)),
++              protectedPriorityTarget:
++                getStrategyTraits(deps.strategy).honorsFallbackOnlyTargets &&
++                target.fallbackOnlyOnQuotaExhaustion === true,
++            }
++          : await extra.evaluateGates({ index: i, state, deps });
+         if (gate.kind === "skip") return gate.result;
+         return extra.executeAttempt({
+           index: i,
+@@ -406,6 +448,7 @@ export async function dispatchWithCooldownRetry(opts: {
+           targetForAttempt: gate.targetForAttempt,
+           profile: gate.profile,
+           protectedPriorityTarget: gate.protectedPriorityTarget,
++          completedAttempt,
+         });
+       };
+ 
+@@ -675,6 +718,7 @@ export async function dispatchWithCooldownRetry(opts: {
+             0,
+             extra.comboCooldownBudgetLeftMs.current - circuitOpenWait.waitMs
+           );
++          state.orderedTargets = originalTargets;
+           return dispatchWithCooldownRetry({ state, deps, extra });
+         }
+         // #16319: a model-scoped cooldown is not a circuit-open skip. With zero
+@@ -711,6 +755,7 @@ export async function dispatchWithCooldownRetry(opts: {
+             0,
+             extra.comboCooldownBudgetLeftMs.current - modelLockWait.waitMs
+           );
++          state.orderedTargets = originalTargets;
+           return dispatchWithCooldownRetry({ state, deps, extra });
+         }
+       }
+@@ -910,6 +955,7 @@ export async function dispatchWithCooldownRetry(opts: {
+             0,
+             extra.comboCooldownBudgetLeftMs.current - decision.waitMs
+           );
++          state.orderedTargets = originalTargets;
+           return dispatchWithCooldownRetry({ state, deps, extra });
+         }
+       }
+@@ -979,5 +1025,6 @@ export async function dispatchWithCooldownRetry(opts: {
+       clearTimeout(activeLoopSafetyTimer);
+       activeLoopSafetyTimer = null;
+     }
++    if (completedPin) void completedPin.response.body?.cancel().catch(() => {});
+   }
+ }
+diff --git a/open-sse/services/combo/executeTargetAttempt.ts b/open-sse/services/combo/executeTargetAttempt.ts
+index 25250c3e..dccc4cfa 100644
+--- a/open-sse/services/combo/executeTargetAttempt.ts
++++ b/open-sse/services/combo/executeTargetAttempt.ts
+@@ -85,6 +85,7 @@ import {
+   validateResponseQuality,
+   releaseQualityClone,
+   releaseRejectedQualityResponse,
++  type ResponseQualityResult,
+ } from "./validateQuality.ts";
+ import { isTrustedEmptyTurn } from "./emptyTurnTrust.ts";
+ import { getEmptyTurnDiagnostics } from "../../utils/emptyTurnPolicy.ts";
+@@ -175,8 +176,10 @@ export async function executeTargetAttempt(
+     deps.clientRequestedStream && deps.resilienceSettings.streamRecovery.enabled === true;
+   // Retry loop for transient errors
+   for (let retry = 0; retry <= deps.maxRetries; retry++) {
++    const completed = retry === 0 ? opts.completedAttempt : undefined;
+     // Fix #1681: Bail out immediately if the client has disconnected
+     if (deps.signal?.aborted) {
++      if (completed) releaseRejectedQualityResponse(completed.response, completed.response);
+       deps.log.info("COMBO", `Client disconnected — aborting combo loop before model ${modelStr}`);
+       return { ok: false, response: errorResponse(499, "Client disconnected") };
+     }
+@@ -201,7 +204,8 @@ export async function executeTargetAttempt(
+       deps.config.zeroLatencyOptimizationsEnabled === true &&
+       deps.config.predictiveTtftMs &&
+       deps.config.predictiveTtftMs > 0 &&
+-      retry === 0
++      retry === 0 &&
++      !completed
+     ) {
+       const cMetrics = getComboMetrics(deps.combo.name);
+       if (cMetrics) {
+@@ -372,12 +376,14 @@ export async function executeTargetAttempt(
+       }
+       if (state.comboExpired || targetSignal?.aborted) return null;
+     }
+-    const result = await deps.handleSingleModelWithTimeout(attemptBody, modelStr, {
+-      ...targetForAttempt,
+-      emptyTurnConnectionId,
+-      effectiveComboStrategy: deps.strategy,
+-      failoverBeforeRetry: deps.config.failoverBeforeRetry,
+-    });
++    const result =
++      completed?.response ??
++      (await deps.handleSingleModelWithTimeout(attemptBody, modelStr, {
++        ...targetForAttempt,
++        emptyTurnConnectionId,
++        effectiveComboStrategy: deps.strategy,
++        failoverBeforeRetry: deps.config.failoverBeforeRetry,
++      }));
+ 
+     if (preContentTransportRecovery && deps.signal?.aborted) {
+       releaseRejectedQualityResponse(result, result);
+@@ -408,24 +414,26 @@ export async function executeTargetAttempt(
+       // Clone BEFORE quality check — validateResponseQuality reads the body
+       // via getReader() which locks the stream. The clone's body is consumed
+       // by the quality check; the original stays unlocked for piping.
+-      const qualityClone = cloneForQuality(result);
+-      const quality = await validateResponseQuality(
+-        qualityClone,
+-        deps.clientRequestedStream,
+-        deps.log,
+-        deps.config.responseValidation as ResponseValidationConfig | null | undefined,
+-        targetSignal
+-          ? preContentTransportRecovery
+-            ? AbortSignal.any(
+-                [deps.signal, targetSignal].filter((signal): signal is AbortSignal => !!signal)
+-              )
+-            : targetSignal
+-          : preContentTransportRecovery
+-            ? deps.signal
+-            : null,
+-        await isTrustedEmptyTurn(provider, result, target.connectionId),
+-        preContentTransportRecovery
+-      );
++      const qualityClone = completed?.quality ? result : cloneForQuality(result);
++      const quality: ResponseQualityResult =
++        completed?.quality ??
++        (await validateResponseQuality(
++          qualityClone,
++          deps.clientRequestedStream,
++          deps.log,
++          deps.config.responseValidation as ResponseValidationConfig | null | undefined,
++          targetSignal
++            ? preContentTransportRecovery
++              ? AbortSignal.any(
++                  [deps.signal, targetSignal].filter((signal): signal is AbortSignal => !!signal)
++                )
++              : targetSignal
++            : preContentTransportRecovery
++              ? deps.signal
++              : null,
++          await isTrustedEmptyTurn(provider, result, target.connectionId),
++          preContentTransportRecovery
++        ));
+       releaseQualityClone(qualityClone, result, quality);
+       if (preContentTransportRecovery && deps.signal?.aborted) {
+         void quality.clonedResponse?.body?.cancel().catch(() => {});
+@@ -557,14 +565,17 @@ export async function executeTargetAttempt(
+ 
+       // #13954 (opt-in): a quality-valid 200 that narrates instead of calling the next tool.
+       if (
+-        await isAgenticStallComboAttempt({
++        (completed?.agenticStall &&
++          !protectedPriorityTarget &&
++          i + 1 < state.orderedTargets.length) ||
++        (await isAgenticStallComboAttempt({
+           body: deps.body,
+           result,
+           modelStr,
+           hasNextTarget: i + 1 < state.orderedTargets.length,
+           protectedPriorityTarget,
+           log: deps.log,
+-        })
++        }))
+       ) {
+         recordAgenticStallAttempt({
+           result,
+@@ -814,7 +825,8 @@ export async function executeTargetAttempt(
+       return { ok: true, response: result };
+     }
+ 
+-    const failure = await readAttemptFailure(result, { log: deps.log, modelStr });
++    const failure =
++      completed?.failure ?? (await readAttemptFailure(result, { log: deps.log, modelStr }));
+     const { errorText, errorBody, structuredError } = failure;
+     // Return the original verdict before retry hints, health or affinity mutations.
+     // The attempt loop treats this as fatal and cancels already-running hedges.
+@@ -978,6 +990,7 @@ export async function executeTargetAttempt(
+     const { cooldownMs } = fallbackResult;
+     const targetFailure = applyComboTargetExhaustion(target, {
+       result,
++      inferProviderWhenUnbound: completed?.unidentifiedConnection ? false : undefined,
+       fallbackResult,
+       errorText,
+       rawModel,
+diff --git a/open-sse/services/combo/contextPinAttempt.ts b/open-sse/services/combo/contextPinAttempt.ts
+new file mode 100644
+index 00000000..8ff51925
+--- /dev/null
++++ b/open-sse/services/combo/contextPinAttempt.ts
+@@ -0,0 +1,88 @@
++/**
++ * Match a completed context pin to the native target it consumed.
++ * A missing selected-account header is not evidence that every account in a
++ * union failed. Match the exact pool binding, or keep explicit sibling targets.
++ */
++import { withBodyTimeout } from "../../utils/stream.ts";
++import { errorResponse } from "../../utils/error.ts";
++import type { CompletedTargetAttempt } from "./attemptLoopTypes.ts";
++import type { ResolvedComboTarget } from "./types.ts";
++
++function accountPool(target: ResolvedComboTarget): string[] {
++  if (target.connectionId) return [target.connectionId];
++  return [...new Set(target.allowedConnectionIds ?? [])].sort();
++}
++
++function sameBinding(left: ResolvedComboTarget, right: ResolvedComboTarget): boolean {
++  const a = accountPool(left);
++  const b = accountPool(right);
++  return a.length === b.length && a.every((id, index) => id === b[index]);
++}
++
++export function prepareCompletedContextPin(
++  targets: ResolvedComboTarget[],
++  completed: CompletedTargetAttempt
++): { targets: ResolvedComboTarget[]; attempt: CompletedTargetAttempt } {
++  const pin = completed.target;
++  const selectedId =
++    completed.response.headers.get("X-OmniRoute-Selected-Connection-Id") || pin.connectionId;
++  const accountMatch = selectedId
++    ? targets.findIndex(
++        (target) => target.modelStr === pin.modelStr && target.connectionId === selectedId
++      )
++    : -1;
++  const match =
++    accountMatch >= 0
++      ? accountMatch
++      : targets.findIndex((target) => target.modelStr === pin.modelStr && sameBinding(target, pin));
++  const target: ResolvedComboTarget =
++    match >= 0
++      ? targets[match]
++      : {
++          ...pin,
++          executionKey: `${pin.executionKey}:completed-context-pin`,
++          connectionId: selectedId || null,
++          ...(selectedId ? { allowedConnectionIds: [selectedId] } : {}),
++        };
++  return {
++    targets: [target, ...targets.filter((_, index) => index !== match)],
++    attempt: { ...completed, target, unidentifiedConnection: match < 0 && !selectedId },
++  };
++}
++
++/**
++ * The pin's deadline includes health lookup, headers and response validation.
++ * Reuse the native body-timeout race, and abort the same provider signal when
++ * it wins; per-target and declared first-output budgets retain their own units.
++ */
++export async function runContextPinPrelude(args: {
++  run: (signal: AbortSignal) => Promise<Response | null>;
++  deadline: number | null;
++  signal?: AbortSignal | null;
++}): Promise<Response | null> {
++  if (args.signal?.aborted) return errorResponse(499, "Client disconnected");
++  const remaining = args.deadline === null ? null : args.deadline - Date.now();
++  const timeoutResponse = () =>
++    errorResponse(504, "Combo global timeout during context pin", {
++      code: "COMBO_TIMEOUT",
++      type: "server_error",
++    });
++  if (remaining !== null && remaining <= 0) return timeoutResponse();
++  const controller = new AbortController();
++  const signal = args.signal
++    ? AbortSignal.any([args.signal, controller.signal])
++    : controller.signal;
++  try {
++    const pending = args.run(signal);
++    const result = remaining === null ? await pending : await withBodyTimeout(pending, remaining);
++    if (args.signal?.aborted) {
++      void result?.body?.cancel().catch(() => {});
++      return errorResponse(499, "Client disconnected");
++    }
++    return result;
++  } catch (error) {
++    controller.abort(error);
++    if (error instanceof Error && error.name === "BodyTimeoutError") return timeoutResponse();
++    throw error;
++  }
++}
+diff --git a/open-sse/services/combo/targetExhaustion.ts b/open-sse/services/combo/targetExhaustion.ts
+index 6618e8a1..6ed5847b 100644
+--- a/open-sse/services/combo/targetExhaustion.ts
++++ b/open-sse/services/combo/targetExhaustion.ts
+@@ -140,6 +140,8 @@ export type ApplyComboTargetExhaustionOptions = {
+   rawModel: string;
+   isTokenLimitBreach: boolean;
+   allAccountsRateLimited: boolean;
++  /** A completed union pin with no selected account cannot exhaust its untried siblings. */
++  inferProviderWhenUnbound?: boolean;
+   requestScopedFailure: boolean;
+   sets: ComboExhaustionSets;
+   log: ComboLogger;
+@@ -530,6 +532,7 @@ function markTransientOrConnectionLevel(
+     sets.transientRateLimitedProviders.add(provider);
+   }
+   markConnectionLevelExhaustion(target, {
++    inferProviderWhenUnbound: opts.inferProviderWhenUnbound,
+     result,
+     errorText,
+     sets,
+@@ -640,6 +643,7 @@ function markConnectionLevelExhaustion(
+     | "rawModel"
+     | "requestScopedFailure"
+     | "structuredError"
++    | "inferProviderWhenUnbound"
+   >
+ ): void {
+   const { result, errorText, sets, log, tag, rawModel, requestScopedFailure, structuredError } =
+@@ -681,7 +685,7 @@ function markConnectionLevelExhaustion(
+       tag,
+       `Provider ${provider} connection ${connId} error (${result.status}) — marking for skip on remaining targets (#1731v2)`
+     );
+-  } else {
++  } else if (opts.inferProviderWhenUnbound !== false) {
+     sets.exhaustedProviders.add(provider);
+     log.info(
+       tag,
+diff --git a/tests/unit/combo-context-pin-budget.test.ts b/tests/unit/combo-context-pin-budget.test.ts
+new file mode 100644
+index 00000000..f89f13c5
+--- /dev/null
++++ b/tests/unit/combo-context-pin-budget.test.ts
+@@ -0,0 +1,694 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import fs from "node:fs";
++import os from "node:os";
++import path from "node:path";
++import type { ComboLike, SingleModelTarget } from "../../open-sse/services/combo/types.ts";
++
++const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-context-pin-budget-"));
++process.env.DATA_DIR = dataDir;
++process.env.API_KEY_SECRET = "unit-test-context-pin-budget-secret";
++process.env.DISABLE_SQLITE_AUTO_BACKUP = "true";
++
++const { handleComboChat } = await import("../../open-sse/services/combo.ts");
++const { recordSessionModelUsage } = await import("../../src/lib/db/contextHandoffs.ts");
++const { scopeHandoffSessionId } =
++  await import("../../open-sse/services/combo/handoffSessionScope.ts");
++const { createProviderConnection } = await import("../../src/lib/db/providers.ts");
++const { invalidateDbCache } = await import("../../src/lib/db/readCache.ts");
++const { resetDbInstance } = await import("../../src/lib/db/core.ts");
++const { clearSessions } = await import("../../open-sse/services/sessionManager.ts");
++const { resetAllCircuitBreakers } = await import("../../src/shared/utils/circuitBreaker.ts");
++const { clearAllModelLockouts } = await import("../../open-sse/services/accountFallback.ts");
++
++const noop = () => {};
++const log = { info: noop, warn: noop, debug: noop, error: noop };
++
++test.after(async () => {
++  await new Promise<void>((resolve) => setImmediate(resolve));
++  clearSessions();
++  resetAllCircuitBreakers();
++  clearAllModelLockouts();
++  resetDbInstance();
++  fs.rmSync(dataDir, { recursive: true, force: true });
++});
++
++function response(status: number) {
++  const body =
++    status === 200
++      ? { choices: [{ message: { content: "A complete fixture response." } }] }
++      : { error: { message: "Fixture temporarily unavailable", code: "upstream_error" } };
++  return new Response(JSON.stringify(body), {
++    status,
++    headers: { "Content-Type": "application/json" },
++  });
++}
++
++async function runCase(
++  tag: string,
++  options: {
++    pinResult?:
++      | "success"
++      | "503"
++      | "402"
++      | "429-quota"
++      | "401"
++      | "stall"
++      | "empty"
++      | "slow-json"
++      | "slow-error"
++      | "silent-stream"
++      | "timeout";
++    provider?: string;
++    binding?: "unique" | "dynamic" | "pool" | "separate-accounts";
++    selectedHeader?: boolean;
++    succeedPinOnAttempt?: number;
++    failFallback?: boolean;
++    holdFallback?: boolean;
++    fallbackCompleteMs?: number;
++    body?: Record<string, unknown>;
++    pinDelayMs?: number;
++    protectedPin?: boolean;
++    abort?: "before" | "during";
++    config?: Record<string, unknown>;
++    pinHistory?: boolean;
++    onPinAttempt?: () => void;
++    cooldownRecovery?: boolean;
++  } = {}
++) {
++  resetAllCircuitBreakers();
++  clearAllModelLockouts();
++  const provider = options.provider ?? "pinbudget";
++  const pinModel = `${provider}/pin-${tag}`;
++  const fallbackModel = `pinbudgetfallback/healthy-${tag}`;
++  const pinAccount = await createProviderConnection({
++    provider,
++    authType: "api-key",
++    name: `pin-${tag}`,
++    apiKey: "test-only-provider-credential",
++    isActive: true,
++  });
++  const fallbackAccount = await createProviderConnection({
++    provider: "pinbudgetfallback",
++    authType: "api-key",
++    name: `fallback-${tag}`,
++    apiKey: "test-only-provider-credential",
++    isActive: true,
++  });
++  const siblingAccount = await createProviderConnection({
++    provider,
++    authType: "api-key",
++    name: `sibling-${tag}`,
++    apiKey: "test-only-provider-credential",
++    isActive: true,
++  });
++  invalidateDbCache();
++  const sessionId = `pin-budget-${tag}`;
++  const combo: ComboLike = {
++    name: `context-pin-budget-${tag}`,
++    strategy: "priority",
++    context_cache_protection: true,
++    models: [
++      {
++        model: pinModel,
++        ...(options.binding === "dynamic"
++          ? {}
++          : options.binding === "pool"
++            ? { allowedConnectionIds: [pinAccount.id, siblingAccount.id] }
++            : { connectionId: pinAccount.id }),
++        fallbackOnlyOnQuotaExhaustion: options.protectedPin === true,
++      },
++      ...(options.binding === "separate-accounts"
++        ? [{ model: pinModel, connectionId: siblingAccount.id }]
++        : []),
++      { model: fallbackModel, connectionId: fallbackAccount.id },
++    ],
++    config: {
++      maxRetries: 0,
++      maxSetRetries: 0,
++      failoverBeforeRetry: true,
++      retryDelayMs: 0,
++      fallbackDelayMs: 0,
++      targetTimeoutMs: 2000,
++      ...options.config,
++    },
++  };
++  if (options.cooldownRecovery) combo.models!.reverse();
++  if (options.pinHistory !== false) {
++    recordSessionModelUsage(
++      scopeHandoffSessionId(sessionId, null)!,
++      combo.name,
++      pinModel,
++      provider
++    );
++  }
++  const calls: Array<{ model: string; connectionId?: string; pinned: boolean }> = [];
++  const bindings: Array<{ connectionId?: string | null; allowedConnectionIds?: string[] | null }> =
++    [];
++  let aborted = 0;
++  let pinAttempts = 0;
++  let completedBodies = 0;
++  const controller = new AbortController();
++  if (options.abort === "before") controller.abort();
++  const startedAt = performance.now();
++  const result = await handleComboChat({
++    body: {
++      model: combo.name,
++      messages: [{ role: "user", content: `Continue isolated case ${tag}` }],
++      stream: false,
++      ...options.body,
++    },
++    combo,
++    allCombos: [combo],
++    log,
++    settings: options.cooldownRecovery
++      ? {
++          modelLockout: {
++            enabled: true,
++            errorCodes: [429],
++            baseCooldownMs: 150,
++            maxCooldownMs: 2000,
++            maxBackoffSteps: 0,
++            useExponentialBackoff: false,
++          },
++          resilienceSettings: {
++            comboCooldownWait: { enabled: true, maxWaitMs: 2000, maxAttempts: 1, budgetMs: 3000 },
++          },
++        }
++      : null,
++    relayOptions: { sessionId },
++    signal: controller.signal,
++    isModelAvailable: async () => true,
++    handleSingleModel: async (_body, model: string, target?: SingleModelTarget) => {
++      const accountTarget =
++        target && ("connectionId" in target || "modelPinned" in target) ? target : undefined;
++      calls.push({
++        model,
++        connectionId: accountTarget?.connectionId ?? undefined,
++        pinned: accountTarget?.modelPinned === true,
++      });
++      bindings.push({
++        connectionId: accountTarget?.connectionId,
++        allowedConnectionIds: accountTarget?.allowedConnectionIds,
++      });
++      if (options.cooldownRecovery) {
++        if (calls.filter((call) => call.model === model).length > 1) return response(200);
++        return Response.json(
++          {
++            error: { message: "Fixture rate limited" },
++            retryAfter: new Date(Date.now() + 1000).toISOString(),
++          },
++          { status: 429 }
++        );
++      }
++      if (model !== pinModel) {
++        if (options.holdFallback) {
++          return new Promise<Response>((_resolve, reject) => {
++            assert.ok(target?.modelAbortSignal);
++            const completion = options.fallbackCompleteMs
++              ? setTimeout(() => _resolve(response(200)), options.fallbackCompleteMs)
++              : undefined;
++            target.modelAbortSignal.addEventListener(
++              "abort",
++              () => {
++                clearTimeout(completion);
++                aborted += 1;
++                reject(new Error("fixture fallback aborted"));
++              },
++              { once: true }
++            );
++          });
++        }
++        return response(options.failFallback ? 503 : 200);
++      }
++      pinAttempts += 1;
++      if (
++        options.pinResult === "success" ||
++        pinAttempts === options.succeedPinOnAttempt ||
++        accountTarget?.connectionId === siblingAccount.id
++      )
++        return response(200);
++      if (options.pinDelayMs)
++        await new Promise((resolve) => setTimeout(resolve, options.pinDelayMs));
++      options.onPinAttempt?.();
++      if (options.abort === "during") controller.abort();
++      if (["slow-json", "slow-error", "silent-stream"].includes(options.pinResult ?? "")) {
++        const status = options.pinResult === "slow-error" ? 503 : 200;
++        const isStream = options.pinResult === "silent-stream";
++        const encoded = new TextEncoder().encode(
++          JSON.stringify(
++            status === 200
++              ? { choices: [{ message: { content: "Delayed body" } }] }
++              : { error: { message: "Delayed upstream failure" } }
++          )
++        );
++        let completion: ReturnType<typeof setTimeout> | undefined;
++        const delayedBody = new ReadableStream<Uint8Array>({
++          start(streamController) {
++            completion = setTimeout(
++              () => {
++                completedBodies += 1;
++                streamController.enqueue(encoded);
++                streamController.close();
++              },
++              isStream ? 3000 : 200
++            );
++            target?.modelAbortSignal?.addEventListener(
++              "abort",
++              () => {
++                clearTimeout(completion);
++                aborted += 1;
++                streamController.error(new Error("fixture body aborted"));
++              },
++              { once: true }
++            );
++          },
++          cancel() {
++            clearTimeout(completion);
++          },
++        });
++        return new Response(delayedBody, {
++          status,
++          headers: { "Content-Type": isStream ? "text/event-stream" : "application/json" },
++        });
++      }
++      if (options.pinResult === "timeout") {
++        return new Promise<Response>((_resolve, reject) => {
++          assert.ok(target?.modelAbortSignal, "native timeout must supply an abort signal");
++          target.modelAbortSignal.addEventListener(
++            "abort",
++            () => {
++              aborted += 1;
++              reject(new Error("fixture timeout aborted"));
++            },
++            { once: true }
++          );
++        });
++      }
++      const failed =
++        options.pinResult === "402"
++          ? Response.json(
++              { error: { message: "Credits exhausted", code: "credits_exhausted" } },
++              { status: 402 }
++            )
++          : options.pinResult === "429-quota"
++            ? Response.json(
++                { error: { message: "Subscription quota exhausted", code: "quota_exhausted" } },
++                { status: 429 }
++              )
++            : options.pinResult === "401"
++              ? Response.json({ error: { message: "Authentication expired" } }, { status: 401 })
++              : options.pinResult === "stall"
++                ? Response.json({
++                    object: "chat.completion",
++                    choices: [
++                      {
++                        index: 0,
++                        message: { role: "assistant", content: "Silent retry succeeded" },
++                        finish_reason: "stop",
++                      },
++                    ],
++                  })
++                : options.pinResult === "empty"
++                  ? new Response("", { headers: { "Content-Type": "application/json" } })
++                  : response(503);
++      if (options.selectedHeader) {
++        failed.headers.set("X-OmniRoute-Selected-Connection-Id", pinAccount.id);
++      }
++      return failed;
++    },
++  });
++  return {
++    result,
++    calls,
++    bindings,
++    aborted,
++    completedBodies,
++    pinModel,
++    fallbackModel,
++    pinAccount,
++    siblingAccount,
++    elapsedMs: performance.now() - startedAt,
++  };
++}
++
++test("a healthy context pin preserves affinity and its account binding", async () => {
++  const run = await runCase("healthy-pin", { pinResult: "success" });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(run.calls, [
++    { model: run.pinModel, connectionId: run.pinAccount.id, pinned: true },
++  ]);
++});
++
++test("an unpinned request still tries each target once with retries disabled", async () => {
++  const run = await runCase("without-pin", { pinHistory: false });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++});
++
++test("a failed context pin advances to the healthy target without an extra retry", async () => {
++  const run = await runCase("status-503");
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++  assert.equal(run.calls[0].pinned, true);
++});
++
++test("a native pinned-target timeout advances without repeating the timed-out target", async () => {
++  const run = await runCase("native-timeout", {
++    pinResult: "timeout",
++    config: { targetTimeoutMs: 25 },
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++  assert.equal(run.aborted, 1);
++});
++
++test("the context-pin attempt consumes the configured global-attempt budget", async () => {
++  const run = await runCase("global-cap", { config: { maxGlobalAttempts: 1 } });
++  assert.equal(run.result.ok, false);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel]
++  );
++});
++
++test("time spent in the failed context pin consumes the combo deadline", async (t) => {
++  let now = Date.now();
++  t.mock.method(Date, "now", () => now);
++  const run = await runCase("deadline", {
++    config: { comboTimeoutMs: 50 },
++    onPinAttempt: () => {
++      now += 100;
++    },
++  });
++  assert.equal(run.result.status, 504);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel]
++  );
++});
++
++test("the native timeout is bounded while the pin is still in the prelude", async () => {
++  const run = await runCase("prelude-deadline", {
++    pinResult: "timeout",
++    config: { targetTimeoutMs: 2000, comboTimeoutMs: 50 },
++  });
++  assert.equal(run.result.status, 504);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel]
++  );
++  assert.equal(run.aborted, 1);
++  assert.ok(run.elapsedMs < 500, `global deadline returned after ${run.elapsedMs}ms`);
++});
++
++test("a dynamic pool target is consumed without inventing its selected account", async () => {
++  const run = await runCase("dynamic", { binding: "dynamic" });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++  assert.equal(run.calls[0].connectionId, undefined);
++});
++
++test("an allowlisted pool target is consumed even when the timeout has no account header", async () => {
++  const run = await runCase("pool-timeout", {
++    binding: "pool",
++    pinResult: "timeout",
++    config: { targetTimeoutMs: 25 },
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++  assert.deepEqual(run.bindings[0].allowedConnectionIds, [
++    run.pinAccount.id,
++    run.siblingAccount.id,
++  ]);
++});
++
++test("an identified failed account preserves another account of the same model", async () => {
++  const run = await runCase("account-sibling", {
++    binding: "separate-accounts",
++    selectedHeader: true,
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(run.calls, [
++    { model: run.pinModel, connectionId: undefined, pinned: true },
++    { model: run.pinModel, connectionId: run.siblingAccount.id, pinned: false },
++  ]);
++  assert.deepEqual(run.bindings[0].allowedConnectionIds, [
++    run.pinAccount.id,
++    run.siblingAccount.id,
++  ]);
++});
++
++test("an unidentified union pin keeps its explicit account targets eligible", async () => {
++  const run = await runCase("union-unknown", {
++    binding: "separate-accounts",
++    config: { maxGlobalAttempts: 2 },
++  });
++  assert.deepEqual(run.calls, [
++    { model: run.pinModel, connectionId: undefined, pinned: true },
++    { model: run.pinModel, connectionId: run.pinAccount.id, pinned: false },
++  ]);
++  assert.equal(run.result.ok, false);
++});
++
++test("an explicitly authorized same-target retry still succeeds", async () => {
++  const run = await runCase("explicit-retry", {
++    succeedPinOnAttempt: 2,
++    config: { maxRetries: 1, failoverBeforeRetry: false },
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.pinModel]
++  );
++});
++
++test("explicit failover preference skips same-target retry when a sibling exists", async () => {
++  const run = await runCase("explicit-failover", {
++    config: { maxRetries: 1, failoverBeforeRetry: true },
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++});
++
++test("an explicit set retry starts only after each target in the first pass", async () => {
++  const run = await runCase("explicit-set-retry", {
++    succeedPinOnAttempt: 2,
++    failFallback: true,
++    config: { maxRetries: 0, maxSetRetries: 1, setRetryDelayMs: 0 },
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel, run.pinModel]
++  );
++});
++
++test("a protected pin allows fallback only after native quota classification", async () => {
++  const run = await runCase("protected-quota", {
++    pinResult: "402",
++    protectedPin: true,
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++});
++
++test("a protected pin does not turn a transient failure into quota exhaustion", async () => {
++  const run = await runCase("protected-transient", { protectedPin: true });
++  assert.equal(run.result.ok, false);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel]
++  );
++});
++
++test("a quality-rejected pin is consumed without sending the prompt twice", async () => {
++  const run = await runCase("quality-empty", { pinResult: "empty" });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++});
++
++test("an already aborted client does not dispatch the context pin", async () => {
++  const run = await runCase("client-before", { abort: "before" });
++  assert.equal(run.result.status, 499);
++  assert.deepEqual(run.calls, []);
++});
++
++test("client cancellation during the context pin stops subsequent dispatch", async () => {
++  const run = await runCase("client-during", { abort: "during" });
++  assert.equal(run.result.status, 499);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel]
++  );
++});
++
++test("a 429 quota verdict from the pin permits the protected fallback once", async () => {
++  const run = await runCase("protected-429-quota", {
++    pinResult: "429-quota",
++    protectedPin: true,
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++});
++
++for (const binding of ["pool", "dynamic"] as const) {
++  test(`a selected-account header still consumes the original ${binding} binding`, async () => {
++    const run = await runCase(`selected-${binding}`, { binding, selectedHeader: true });
++    assert.equal(run.result.status, 200);
++    assert.deepEqual(
++      run.calls.map((call) => call.model),
++      [run.pinModel, run.fallbackModel]
++    );
++  });
++}
++
++test("a hanging fallback receives only the time left after the pin", async () => {
++  const run = await runCase("remaining-deadline", {
++    pinDelayMs: 600,
++    holdFallback: true,
++    fallbackCompleteMs: 700,
++    config: { targetTimeoutMs: 5000, comboTimeoutMs: 1000 },
++  });
++  assert.equal(run.result.status, 504);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++  assert.equal(run.aborted, 1);
++});
++
++test("the pin also consumes the attempt budget across an explicit set retry", async () => {
++  const run = await runCase("set-global-cap", {
++    succeedPinOnAttempt: 2,
++    failFallback: true,
++    config: { maxGlobalAttempts: 2, maxSetRetries: 1, setRetryDelayMs: 0 },
++  });
++  assert.equal(run.result.ok, false);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++});
++
++for (const pinResult of ["402", "429-quota", "401"] as const) {
++  test(`an unidentified union retains native provider-wide ${pinResult} exhaustion`, async () => {
++    const run = await runCase(`union-wide-${pinResult}`, {
++      binding: "separate-accounts",
++      pinResult,
++      ...(pinResult === "429-quota" ? { provider: "claude" } : {}),
++    });
++    assert.equal(run.result.status, 200);
++    assert.deepEqual(
++      run.calls.map((call) => call.model),
++      [run.pinModel, run.fallbackModel]
++    );
++  });
++}
++
++for (const variant of ["fallback", "held", "protected"] as const) {
++  test(`a stalled pin preserves native ${variant} response handling`, async () => {
++    const previous = process.env.OMNIROUTE_AGENTIC_STALL_FAILOVER;
++    process.env.OMNIROUTE_AGENTIC_STALL_FAILOVER = "1";
++    try {
++      const run = await runCase(`stall-${variant}`, {
++        pinResult: "stall",
++        failFallback: variant === "held",
++        protectedPin: variant === "protected",
++        body: {
++          tools: [{ type: "function", function: { name: "read_file" } }],
++          messages: [
++            { role: "user", content: "fix the bug" },
++            { role: "assistant", content: null, tool_calls: [{ id: "c1" }] },
++            { role: "tool", tool_call_id: "c1", content: "file contents" },
++          ],
++        },
++      });
++      assert.equal(run.result.status, 200);
++      assert.deepEqual(
++        run.calls.map((call) => call.model),
++        variant === "protected" ? [run.pinModel] : [run.pinModel, run.fallbackModel]
++      );
++      const payload = await run.result.json();
++      assert.equal(
++        payload.choices[0].message.content,
++        variant === "fallback" ? "A complete fixture response." : "Silent retry succeeded"
++      );
++    } finally {
++      if (previous === undefined) delete process.env.OMNIROUTE_AGENTIC_STALL_FAILOVER;
++      else process.env.OMNIROUTE_AGENTIC_STALL_FAILOVER = previous;
++    }
++  });
++}
++
++for (const pinResult of ["slow-json", "slow-error"] as const) {
++  test(`the global deadline covers a delayed ${pinResult} body after headers`, async () => {
++    const run = await runCase(`body-deadline-${pinResult}`, {
++      pinResult,
++      config: { targetTimeoutMs: 2000, comboTimeoutMs: 50 },
++    });
++    assert.equal(run.result.status, 504);
++    assert.equal(run.completedBodies, 0, "the deadline must win before the body finishes");
++    assert.equal(run.aborted, 1);
++    assert.deepEqual(
++      run.calls.map((call) => call.model),
++      [run.pinModel]
++    );
++  });
++}
++
++test("the pin retains its shorter native first-output timeout", async () => {
++  const run = await runCase("native-first-output", {
++    pinResult: "silent-stream",
++    body: { stream: true },
++    config: { targetTimeoutMs: 25, comboTimeoutMs: 1000 },
++  });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel]
++  );
++  assert.equal(run.aborted, 1);
++  assert.equal(run.completedBodies, 0);
++});
++
++test("a cooldown retry restores native target order after the consumed context pin", async () => {
++  const run = await runCase("cooldown-order", { cooldownRecovery: true });
++  assert.equal(run.result.status, 200);
++  assert.deepEqual(
++    run.calls.map((call) => call.model),
++    [run.pinModel, run.fallbackModel, run.fallbackModel]
++  );
++  assert.deepEqual(
++    run.calls.map((call) => call.pinned),
++    [true, false, false],
++    "the retry must use the native target order without replaying the pin prelude"
++  );
++});
+diff --git a/tests/unit/combo-loop-safety-timer-cleanup.test.ts b/tests/unit/combo-loop-safety-timer-cleanup.test.ts
+index 1410157c..6162c237 100644
+--- a/tests/unit/combo-loop-safety-timer-cleanup.test.ts
++++ b/tests/unit/combo-loop-safety-timer-cleanup.test.ts
+@@ -44,6 +44,8 @@ async function withControlledSafetyTimer(
+ ): Promise<void> {
+   const originalSetTimeout = globalThis.setTimeout;
+   const originalClearTimeout = globalThis.clearTimeout;
++  const originalDateNow = Date.now;
++  const fixedNow = originalDateNow();
+   const safetyTimers = new Map<ReturnType<typeof setTimeout>, () => void>();
+   const retryTimers = new Map<ReturnType<typeof setTimeout>, () => void>();
+   let retryTimerStarted: (() => void) | undefined;
+@@ -85,6 +87,8 @@ async function withControlledSafetyTimer(
+   }) as typeof clearTimeout;
+ 
+   try {
++    // Keep this manually controlled timer harness on one deterministic deadline.
++    Date.now = () => fixedNow;
+     await run({
+       fireSafetyTimers() {
+         const pending = [...safetyTimers.entries()];
+@@ -119,6 +123,7 @@ async function withControlledSafetyTimer(
+       },
+     });
+   } finally {
++    Date.now = originalDateNow;
+     globalThis.setTimeout = originalSetTimeout;
+     globalThis.clearTimeout = originalClearTimeout;
+   }

@@ -16,6 +16,7 @@ English · [Français](README.fr.md) · [简体中文](README.zh-CN.md)
 | Gemini inline images | One to four validated JPEG/PNG/WebP reference images, with no remote URL fetching |
 | Strict API tool replies | Remove invalid tool-message names only for configured provider IDs; preserve native behavior otherwise |
 | Codex image inventory | Support dedicated image models while retaining OAuth and quotas |
+| Context-cache routing | Count failed pinned attempts once, preserve fallback accounts, and include response validation in the combo deadline |
 | Cloud9 UI | Cloud9 Engine and Speaches icon assets |
 
 **Feature preservation:** optional capabilities and provider compatibility must not be removed just because current usage is zero, a subscription is inactive, or a feature is disabled. Keep them available and configurable. Removal requires the explicit approval of the operator after a documented replacement and regression test.

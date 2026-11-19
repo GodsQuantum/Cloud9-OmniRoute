@@ -378,4 +378,18 @@ test("native tunnel supervisor rejects Linux PID reuse with differing birth toke
   for (const tid of threads) assert.equal(processIsAlive(tid), false);
 });
 ''')
+
+# A failed context-cache pin is the first combo attempt, not a free prelude.
+# Exact native-source patch: repeat runs are harmless; unknown upstream drift
+# stops the candidate build before it can be published.
+patch=pathlib.Path(__file__).resolve().with_name("context-pin-budget.patch")
+command=["git","-C",str(root),"apply"]
+if subprocess.run(command+["--check",str(patch)],capture_output=True).returncode==0:
+    subprocess.run(command+[str(patch)],check=True)
+    print("CLOUD9_CONTEXT_PIN_BUDGET_PATCH_APPLIED")
+elif subprocess.run(command+["--reverse","--check",str(patch)],capture_output=True).returncode==0:
+    print("CLOUD9_CONTEXT_PIN_BUDGET_ALREADY_APPLIED")
+else:
+    raise RuntimeError("CLOUD9_CONTEXT_PIN_BUDGET_UPSTREAM_CONFLICT")
+
 print("CLOUD9_SOURCE_OVERLAY_APPLIED")

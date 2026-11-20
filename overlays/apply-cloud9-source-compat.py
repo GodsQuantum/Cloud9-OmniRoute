@@ -4,7 +4,69 @@ Non-destructive to production; exact upstream TypeScript anchors, idempotent,
 fail-closed on drift. Build and E2E tests are separate release gates.
 """
 import pathlib,sys,subprocess
+
+def apply_responses_replay_usage(source_root):
+    """Apply the qualified native replay patch before any other overlay writes."""
+    import hashlib,json,pathlib,stat,subprocess
+    source_root=pathlib.Path(source_root).absolute()
+    prefix="CLOUD9_RESPONSES_REPLAY_"
+    def read_regular(path, optional=False):
+        path=pathlib.Path(path).absolute()
+        if ".." in path.parts:raise RuntimeError(prefix+"UNSAFE_PATH")
+        current=pathlib.Path(path.anchor)
+        for part in path.parts[1:]:
+            current=current/part
+            try:mode=current.lstat().st_mode
+            except FileNotFoundError:
+                if optional and current==path:return None
+                raise RuntimeError(prefix+"MISSING_INPUT") from None
+            if stat.S_ISLNK(mode) or (current!=path and not stat.S_ISDIR(mode)):
+                raise RuntimeError(prefix+"SYMLINK_OR_INVALID_PARENT")
+        if not stat.S_ISREG(mode):raise RuntimeError(prefix+"NOT_REGULAR")
+        return path.read_bytes()
+    def digest(data):return hashlib.sha256(data).hexdigest()
+    try:package=json.loads(read_regular(source_root/"package.json"))
+    except (ValueError,TypeError):raise RuntimeError(prefix+"INVALID_PACKAGE") from None
+    if not isinstance(package,dict) or package.get("version")!="3.8.54":
+        raise RuntimeError(prefix+"UNQUALIFIED_VERSION")
+    guards={
+        "open-sse/utils/responsesStreamHelpers.ts":
+            "55b132b9d24f06ee398fc8deeb084538df82eaf6bb4822656a13e2102be6943d",
+        "tests/unit/issue-19320-responses-usage-detail-counters.test.ts":
+            "eeb867285d68ac19a36de9e85cc162ac96db7d025ef37a9e78d2449de343866c",
+    }
+    for name,expected in guards.items():
+        if digest(read_regular(source_root/name))!=expected:
+            raise RuntimeError(prefix+"DEPENDENCY_DRIFT: "+name)
+    source=source_root/"open-sse/handlers/chatCore/responsesObjectToSse.ts"
+    before="a8ec9db2afb419938afc390d3232cc91ce80c29bb3892db4b98d843e0ef8de78"
+    after="5fcd4cae33e7a8e704210663103919346f0535dd20a93f299c60dd7191dd9609"
+    contract=source_root/"tests/unit/responses-object-replay-usage.test.ts"
+    contract_hash="6c5b089380ac417ed0f4588429a2aec6dc443022f4e32191e54c8e3040fc1649"
+    patch=pathlib.Path(__file__).absolute().with_name("responses-replay-usage.patch")
+    if digest(read_regular(patch))!="04e3a59195a09107fc4e14d688252dd6f8e967adb45b55d7d87f78eb79c4f314":
+        raise RuntimeError(prefix+"PATCH_DRIFT")
+    source_hash=digest(read_regular(source))
+    contract_bytes=read_regular(contract,optional=True)
+    if source_hash==after and contract_bytes is not None and digest(contract_bytes)==contract_hash:
+        print(prefix+"ALREADY_APPLIED")
+        return "already_applied"
+    if source_hash!=before or contract_bytes is not None:
+        raise RuntimeError(prefix+"SOURCE_DRIFT_OR_MIXED_STATE")
+    command=["git","-C",str(source_root),"apply","--whitespace=error-all"]
+    if subprocess.run(command+["--check",str(patch)],capture_output=True).returncode:
+        raise RuntimeError(prefix+"PATCH_CHECK_FAILED")
+    subprocess.run(command+[str(patch)],check=True,capture_output=True)
+    if digest(read_regular(source))!=after or digest(read_regular(contract))!=contract_hash:
+        raise RuntimeError(prefix+"POST_APPLY_MISMATCH")
+    for name,expected in guards.items():
+        if digest(read_regular(source_root/name))!=expected:
+            raise RuntimeError(prefix+"DEPENDENCY_DRIFT: "+name)
+    print(prefix+"PATCH_APPLIED")
+    return "applied"
+
 if len(sys.argv)!=2:raise SystemExit("usage: apply-cloud9-source-compat.py <upstream worktree>")
+apply_responses_replay_usage(pathlib.Path(sys.argv[1]))
 root=pathlib.Path(sys.argv[1]).resolve()
 if not (root/"open-sse/executors/default.ts").is_file():
     raise SystemExit("Unknown OmniRoute source worktree")

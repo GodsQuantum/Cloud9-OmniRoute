@@ -1,0 +1,171 @@
+--- a/open-sse/handlers/chatCore/responsesObjectToSse.ts
++++ b/open-sse/handlers/chatCore/responsesObjectToSse.ts
+@@ -11,3 +11,5 @@
+  */
+-
++
++import { normalizeResponsesCompletedUsage } from "../../utils/responsesStreamHelpers.ts";
++
+ type JsonObject = Record<string, unknown>;
+@@ -58,2 +60,3 @@
+     const data = { type, sequence_number: sequence++, ...fields };
++    normalizeResponsesCompletedUsage(data);
+     chunks.push(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+--- /dev/null
++++ b/tests/unit/responses-object-replay-usage.test.ts
+@@ -0,0 +1,155 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { synthesizeResponsesSseFromObject } from "../../open-sse/handlers/chatCore/responsesObjectToSse.ts";
++
++function response(usage?: Record<string, unknown>) {
++  return {
++    id: "resp_usage_fixture",
++    object: "response",
++    status: "completed",
++    output: [{
++      id: "msg_usage_fixture",
++      type: "message",
++      status: "completed",
++      role: "assistant",
++      content: [{ type: "output_text", text: "fixture", annotations: [] }],
++    }],
++    ...(usage === undefined ? {} : { usage }),
++  };
++}
++
++function events(body: Record<string, unknown>) {
++  return synthesizeResponsesSseFromObject(body)
++    .split("\n")
++    .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
++    .map((line) => JSON.parse(line.slice(6)));
++}
++
++function completed(body: Record<string, unknown>) {
++  const all = events(body);
++  const terminal = all.filter((event) => event.type === "response.completed");
++  assert.equal(terminal.length, 1);
++  return terminal[0].response;
++}
++
++function freeze(value: any): any {
++  if (value && typeof value === "object") {
++    Object.values(value).forEach(freeze);
++    Object.freeze(value);
++  }
++  return value;
++}
++
++test("replayed cold-cache usage includes the required zero without losing cache creation", () => {
++  const usage = {
++    input_tokens: 42,
++    output_tokens: 3,
++    total_tokens: 45,
++    cache_creation_input_tokens: 31,
++    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 31 },
++    input_tokens_details: {
++      cache_creation_tokens: 31,
++      cache_write_tokens: 31,
++      cache_creation_in_prompt: true,
++    },
++  };
++  const body = freeze(response(usage));
++  const before = structuredClone(body);
++  const terminal = completed(body);
++  assert.deepEqual(terminal.usage, {
++    ...usage,
++    input_tokens_details: { ...usage.input_tokens_details, cached_tokens: 0 },
++  });
++  assert.deepEqual(terminal.output, body.output);
++  assert.deepEqual(body, before, "replay must not mutate the caller's response or usage");
++});
++
++test("replayed warm-cache usage preserves all reads, writes and canonical totals", () => {
++  const usage = {
++    input_tokens: 42,
++    output_tokens: 3,
++    total_tokens: 45,
++    input_tokens_details: {
++      cached_tokens: 17,
++      cache_write_tokens: 11,
++      cache_creation_tokens: 11,
++      cache_creation_in_prompt: true,
++    },
++    output_tokens_details: { reasoning_tokens: 2 },
++  };
++  assert.deepEqual(completed(freeze(response(usage))).usage, usage);
++});
++
++test("replayed valid zero counters remain unchanged", () => {
++  const usage = {
++    input_tokens: 0,
++    output_tokens: 0,
++    total_tokens: 0,
++    input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0, cache_creation_tokens: 0 },
++    output_tokens_details: { reasoning_tokens: 0 },
++  };
++  assert.deepEqual(completed(freeze(response(usage))).usage, usage);
++});
++
++for (const details of [undefined, null]) {
++  test("replayed absent or null detail objects stay optional: " + String(details), () => {
++    const usage = {
++      input_tokens: 4,
++      output_tokens: 2,
++      total_tokens: 6,
++      ...(details === undefined ? {} : {
++        input_tokens_details: details,
++        output_tokens_details: details,
++      }),
++    };
++    assert.deepEqual(completed(freeze(response(usage))).usage, usage);
++  });
++}
++
++test("replayed present empty details contain the required numeric counters", () => {
++  const usage = {
++    input_tokens: 4,
++    output_tokens: 2,
++    total_tokens: 6,
++    input_tokens_details: {},
++    output_tokens_details: {},
++  };
++  assert.deepEqual(completed(freeze(response(usage))).usage, {
++    ...usage,
++    input_tokens_details: { cached_tokens: 0 },
++    output_tokens_details: { reasoning_tokens: 0 },
++  });
++});
++
++test("replayed response with absent usage follows the existing native zero-total contract", () => {
++  const body = freeze(response());
++  assert.deepEqual(completed(body).usage, { input_tokens: 0, output_tokens: 0, total_tokens: 0 });
++  assert.equal(Object.hasOwn(body, "usage"), false);
++});
++
++for (const status of ["failed", "incomplete"]) {
++  test("replay preserves non-completed terminal status and usage: " + status, () => {
++    const usage = { input_tokens_details: { cache_creation_tokens: 7 } };
++    const body = freeze({ ...response(usage), status, error: { code: "fixture_error" } });
++    const all = events(body);
++    const terminal = all.at(-1);
++    assert.equal(terminal.type, "response." + status);
++    assert.deepEqual(terminal.response, body);
++    assert.equal(all.some((event) => event.type === "response.completed"), false);
++  });
++}
++
++test("replay preserves output events, monotonically numbered sequence and DONE", () => {
++  const body = freeze(response({
++    input_tokens: 4,
++    output_tokens: 2,
++    total_tokens: 6,
++    input_tokens_details: { cache_creation_tokens: 1 },
++  }));
++  const sse = synthesizeResponsesSseFromObject(body);
++  const all = events(body);
++  assert.deepEqual(all.map((event) => event.sequence_number), all.map((_, index) => index));
++  assert.deepEqual(all.filter((event) => event.type === "response.output_text.delta").map((event) => event.delta), ["fixture"]);
++  assert.deepEqual(all.filter((event) => event.type === "response.output_item.done").map((event) => event.item), body.output);
++  assert.equal(sse.endsWith("data: [DONE]\n\n"), true);
++});

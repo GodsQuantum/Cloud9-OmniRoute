@@ -273,6 +273,16 @@ if inventory_anchor not in auth_source and (
 change("src/sse/services/auth.ts",inventory_anchor,
        inventory_anchor.replace("requestedModel &&","requestedModel &&\n        !isDedicatedCodexImageModel(c.provider, requestedModel) &&",1))
 
+# The official tunnel client records process birth/executable identity, so a
+# persisted runtime PID cannot be reused or signalled after a Docker recreate.
+# Keep the native installer, checksum verification, manifest and rollback.
+change("open-sse/executors/chatgpt-web-codex/tunnelClient.ts",
+'export const CHATGPT_WEB_CODEX_TUNNEL_VERSION = "0.0.13";\nconst MIGRATABLE_TUNNEL_VERSIONS = new Set(["0.0.10", "0.0.12"]);',
+'export const CHATGPT_WEB_CODEX_TUNNEL_VERSION = "0.0.21";\nconst MIGRATABLE_TUNNEL_VERSIONS = new Set(["0.0.10", "0.0.12", "0.0.13"]);')
+change("tests/unit/chatgpt-web-codex.test.ts",
+'test("pins tunnel-client 0.0.13 and upgrades previously shipped builds", () => {\n  assert.equal(CHATGPT_WEB_CODEX_TUNNEL_VERSION, "0.0.13");\n  assert.equal(tunnelPlatformAsset("darwin", "arm64"), "tunnel-client-v0.0.13-darwin-arm64.zip");\n  assert.equal(tunnelClientInstallAction("0.0.13"), "reuse");\n  assert.equal(tunnelClientInstallAction("0.0.12"), "upgrade");\n  assert.equal(tunnelClientInstallAction("0.0.10"), "upgrade");\n  assert.throws(() => tunnelClientInstallAction("0.0.11"), /not a trusted upgrade source/);\n  assert.throws(() => tunnelClientInstallAction("9.9.9"), /not a trusted upgrade source/);\n});',
+'test("pins tunnel-client 0.0.21 and upgrades previously shipped builds", () => {\n  assert.equal(CHATGPT_WEB_CODEX_TUNNEL_VERSION, "0.0.21");\n  assert.equal(tunnelPlatformAsset("darwin", "arm64"), "tunnel-client-v0.0.21-darwin-arm64.zip");\n  assert.equal(tunnelClientInstallAction("0.0.21"), "reuse");\n  assert.equal(tunnelClientInstallAction("0.0.13"), "upgrade");\n  assert.equal(tunnelClientInstallAction("0.0.12"), "upgrade");\n  assert.equal(tunnelClientInstallAction("0.0.10"), "upgrade");\n  assert.throws(() => tunnelClientInstallAction("0.0.11"), /not a trusted upgrade source/);\n  assert.throws(() => tunnelClientInstallAction("9.9.9"), /not a trusted upgrade source/);\n});')
+
 # CLOUD9_NATIVE_SUPERVISOR_PID_REUSE:
 # The original lease only checks kill(pid, 0). After a container restart that
 # PID can belong to an unrelated Node worker thread or a different process.
@@ -364,7 +374,20 @@ change("open-sse/executors/chatgpt-web-codex/tunnelClient.ts",
 add("tests/unit/cloud9-tunnel-supervisor-lease.test.ts",'''import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
-import { processIsAlive } from "../../open-sse/executors/chatgpt-web-codex/tunnelClient.ts";
+import {
+  CHATGPT_WEB_CODEX_TUNNEL_VERSION,
+  processIsAlive,
+  tunnelClientInstallAction,
+  tunnelPlatformAsset,
+} from "../../open-sse/executors/chatgpt-web-codex/tunnelClient.ts";
+
+test("native tunnel installer upgrades the shipped client to process-identity-aware 0.0.21", () => {
+  assert.equal(CHATGPT_WEB_CODEX_TUNNEL_VERSION, "0.0.21");
+  assert.equal(tunnelClientInstallAction("0.0.13"), "upgrade");
+  assert.equal(tunnelClientInstallAction("0.0.21"), "reuse");
+  assert.equal(tunnelPlatformAsset("linux", "x64"), "tunnel-client-v0.0.21-linux-amd64.zip");
+  assert.throws(() => tunnelClientInstallAction("9.9.9"), /not a trusted upgrade source/);
+});
 
 test("native tunnel supervisor recognises the running owner and invalid pid", () => {
   assert.equal(processIsAlive(process.pid), true);

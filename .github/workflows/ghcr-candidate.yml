@@ -61,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --no-audit --no-fund
-          tests=(tests/unit/cloud9-source-overlay.test.ts tests/unit/cloud9-tunnel-supervisor-lease.test.ts tests/unit/chatgpt-web-first-party-cleanroom.test.ts)
+          tests=(tests/unit/cloud9-source-overlay.test.ts tests/unit/cloud9-tunnel-supervisor-lease.test.ts tests/unit/chatgpt-web-codex.test.ts tests/unit/chatgpt-web-first-party-cleanroom.test.ts)
           tests+=(
             tests/unit/combo-context-pin-budget.test.ts
             tests/unit/combo-dispatch-prelude.test.ts

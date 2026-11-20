@@ -12,7 +12,7 @@ def apply_responses_replay_usage(source_root):
     prefix="CLOUD9_RESPONSES_REPLAY_"
     def read_regular(path, optional=False):
         path=pathlib.Path(path).absolute()
-        if ".." in path.parts:raise RuntimeError(prefix+"UNSAFE_PATH")
+        # Check lexical components before a parent segment can hide a symlink.
         current=pathlib.Path(path.anchor)
         for part in path.parts[1:]:
             current=current/part

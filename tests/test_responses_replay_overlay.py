@@ -126,6 +126,30 @@ class TestResponsesReplayOverlay(unittest.TestCase):
         self.assertIn("CLOUD9_RESPONSES_REPLAY_SYMLINK_OR_INVALID_PARENT", result.stderr)
         self.assertEqual(self.snapshot(), before)
 
+    def test_relative_parent_in_applier_path_preserves_cli_usage(self):
+        launch = self.root.parent / "launch"
+        launch.mkdir()
+        overlays = self.root.parent / "overlays"
+        overlays.mkdir()
+        shutil.copy2(APPLIER, overlays / APPLIER.name)
+        shutil.copy2(PATCH, overlays / PATCH.name)
+        guard = load_guard(launch / ".." / "overlays" / APPLIER.name)
+        self.assertEqual(guard(self.root), "applied")
+        after = self.snapshot()
+        self.assertEqual(guard(launch / ".." / "upstream"), "already_applied")
+        self.assertEqual(self.snapshot(), after)
+
+    def test_symlink_before_parent_segment_is_rejected_before_normalization(self):
+        launch = self.root.parent / "launch"
+        launch.mkdir()
+        alias = self.root.parent / "launch-link"
+        alias.symlink_to(launch, target_is_directory=True)
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError,
+                                    "CLOUD9_RESPONSES_REPLAY_SYMLINK_OR_INVALID_PARENT"):
+            self.apply(alias / ".." / "upstream")
+        self.assertEqual(self.snapshot(), before)
+
     def test_patch_drift_is_refused_before_write(self):
         overlays = self.root.parent / "altered-overlays"
         overlays.mkdir()
